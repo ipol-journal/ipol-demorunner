@@ -123,8 +123,16 @@ async fn ensure_compilation(
 ) -> Json<EnsureCompilationResponse> {
     dbg!(req.clone());
 
-    // TODO: keep a cache somewhere else
-    let dst_path = format!("/tmp/t/{}", req.demo_id);
+    let dst_path = dirs::cache_dir()
+        .unwrap()
+        .join("ipol-demorunner")
+        .join("gits")
+        .join(&req.demo_id);
+    dbg!(&dst_path);
+
+    let logdir = PathBuf::from("/tmp/").join(&req.demo_id);
+    std::fs::create_dir_all(&logdir).unwrap();
+    let mut buildlog = std::fs::File::create(logdir.join("build.log")).unwrap();
 
     // TODO: detect if we actually need to recompile
 
@@ -184,22 +192,29 @@ async fn ensure_compilation(
     };
     let mut image_build_stream = docker.build_image(build_image_options, None, Some(tar));
 
+    let mut compilation_error = None;
     while let Some(msg) = image_build_stream.next().await {
-        // TODO: write to build.log
-        dbg!(&msg);
         if let Ok(info) = msg {
+            if let Some(stream) = info.stream {
+                buildlog.write_all(stream.as_bytes()).unwrap();
+            }
             if let Some(err) = info.error {
-                return Json(EnsureCompilationResponse {
-                    status: "KO".to_string(),
-                    message: err,
-                });
+                buildlog.write_all(err.as_bytes()).unwrap();
+                compilation_error = Some(err);
             }
         }
     }
 
-    Json(EnsureCompilationResponse {
-        status: "OK".to_string(),
-        message: "".to_string(),
+    Json(if let Some(err) = compilation_error {
+        EnsureCompilationResponse {
+            status: "KO".to_string(),
+            message: err,
+        }
+    } else {
+        EnsureCompilationResponse {
+            status: "OK".to_string(),
+            message: "".to_string(),
+        }
     })
 }
 
