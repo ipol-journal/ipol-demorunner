@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::io::Write;
+use std::path::PathBuf;
 use std::time::Duration;
 
 #[macro_use]
@@ -244,13 +246,23 @@ async fn exec_and_wait(req: Json<ExecAndWaitRequest>) -> Json<ExecAndWaitRespons
     dbg!(req.clone());
 
     let image_name = format!("ipol-demo-{}", req.demo_id);
+    // TODO: use the usual exec folder and check that that the current run exists
+    let outdir = PathBuf::from("/tmp/t/exec");
+    let exec_mountpoint = "/workdir";
+    if !outdir.exists() {
+        panic!();
+    }
 
-    let docker = Docker::connect_with_socket_defaults().unwrap();
+    let mut stderr = std::fs::File::create(outdir.join("stderr.txt")).unwrap();
+    let mut stdout = std::fs::File::create(outdir.join("stdout.txt")).unwrap();
 
     let host_config = bollard::service::HostConfig {
         auto_remove: Some(true),
-        // TODO: use the usual exec folder and check that that the current run exists
-        binds: Some(vec!["/tmp/t/exec/:/workdir".to_string()]),
+        binds: Some(vec![format!(
+            "{}:{}",
+            outdir.clone().into_os_string().into_string().unwrap(),
+            exec_mountpoint,
+        )]),
         ..Default::default()
     };
 
@@ -262,8 +274,8 @@ async fn exec_and_wait(req: Json<ExecAndWaitRequest>) -> Json<ExecAndWaitRespons
         format!("IPOL_DEMOID={}", req.demo_id),
         format!("IPOL_KEY={}", req.key),
     ];
-    for param in &req.params {
-        env.push(format!("{}={}", param.0, param.1));
+    for (name, value) in &req.params {
+        env.push(format!("{}={}", name, value));
     }
     let env = env.iter().map(|s| s as &str).collect();
     let config = Config {
@@ -272,10 +284,12 @@ async fn exec_and_wait(req: Json<ExecAndWaitRequest>) -> Json<ExecAndWaitRespons
         user: Some("1000:1000"),
         cmd: Some(vec!["/bin/bash", "-c", req.ddl_run.as_str()]),
         env: Some(env),
-        working_dir: Some("/workdir"),
+        working_dir: Some(exec_mountpoint),
         host_config: Some(host_config),
         ..Default::default()
     };
+
+    let docker = Docker::connect_with_socket_defaults().unwrap();
     let id = docker.create_container(options, config).await.unwrap().id;
     docker.start_container::<String>(&id, None).await.unwrap();
 
@@ -287,18 +301,18 @@ async fn exec_and_wait(req: Json<ExecAndWaitRequest>) -> Json<ExecAndWaitRespons
             follow: true,
             stdout: true,
             stderr: true,
-            timestamps: true,
             ..Default::default()
         });
         let mut logs = docker.logs(&id, options);
         while let Some(msg) = logs.next().await {
-            // TODO: write to stdout.txt and stderr.txt
             match msg {
                 Ok(LogOutput::StdOut { message }) => {
                     println!("stdout: {message:#?}");
+                    stdout.write_all(&message).unwrap();
                 }
                 Ok(LogOutput::StdErr { message }) => {
                     println!("stderr: {message:#?}");
+                    stderr.write_all(&message).unwrap();
                 }
                 Ok(LogOutput::StdIn { message }) => {
                     println!("stdin: {message:#?}");
