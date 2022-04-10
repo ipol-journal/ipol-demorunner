@@ -37,7 +37,7 @@ struct PingResponse {
     ping: String,
 }
 
-#[post("/")]
+#[post("/ping")]
 fn ping() -> Json<PingResponse> {
     Json(PingResponse {
         message: "OK".into(),
@@ -50,7 +50,7 @@ struct ShutdownResponse {
     status: String,
 }
 
-#[get("/")]
+#[get("/shutdown")]
 fn shutdown() -> Json<ShutdownResponse> {
     todo!();
 }
@@ -61,7 +61,7 @@ struct Workload {
     workload: f32,
 }
 
-#[get("/")]
+#[get("/get_workload")]
 fn get_workload() -> Json<Workload> {
     Json(Workload {
         status: "OK".into(),
@@ -77,7 +77,7 @@ struct Stats {
     date: String,
 }
 
-#[get("/")]
+#[get("/get_stats")]
 fn get_stats() -> Json<Stats> {
     todo!();
 }
@@ -94,7 +94,7 @@ struct EnsureCompilationResponse {
     message: String,
 }
 
-#[post("/", data = "<req>")]
+#[post("/ensure_compilation", data = "<req>")]
 async fn ensure_compilation(
     req: Json<EnsureCompilationRequest>,
 ) -> Json<EnsureCompilationResponse> {
@@ -186,7 +186,7 @@ struct TestCompilationRequest {
     compilation_path: String,
 }
 
-#[post("/", data = "<req>")]
+#[post("/test_compilation", data = "<req>")]
 fn test_compilation(req: Json<TestCompilationRequest>) -> Value {
     todo!();
 }
@@ -196,7 +196,7 @@ struct DeleteCompilationRequest {
     demo_id: DemoID,
 }
 
-#[post("/", data = "<req>")]
+#[post("/delete_compilation", data = "<req>")]
 fn delete_compilation(req: Json<DeleteCompilationRequest>) {
     todo!();
 }
@@ -218,7 +218,7 @@ struct ExecAndWaitResponse {
     message: String,
 }
 
-#[post("/", data = "<req>")]
+#[post("/exec_and_wait", data = "<req>")]
 async fn exec_and_wait(req: Json<ExecAndWaitRequest>) -> Json<ExecAndWaitResponse> {
     dbg!(req.clone());
 
@@ -239,6 +239,7 @@ async fn exec_and_wait(req: Json<ExecAndWaitRequest>) -> Json<ExecAndWaitRespons
     });
     let env_demoid = format!("IPOL_DEMOID={}", req.demo_id);
     let env_key = format!("IPOL_KEY={}", req.key);
+    // TODO: params
     let env = vec![env_demoid.as_str(), env_key.as_str()];
     let config = Config {
         image: Some(image_name.as_str()),
@@ -300,16 +301,20 @@ fn index() -> &'static str {
 
 #[launch]
 fn rocket() -> _ {
-    rocket::build()
-        .mount("/", routes![index])
-        .mount("/ping", routes![ping])
-        .mount("/shutdown", routes![shutdown])
-        .mount("/get_workload", routes![get_workload])
-        .mount("/get_stats", routes![get_stats])
-        .mount("/ensure_compilation", routes![ensure_compilation])
-        .mount("/test_compilation", routes![test_compilation])
-        .mount("/delete_compilation", routes![delete_compilation])
-        .mount("/exec_and_wait", routes![exec_and_wait])
+    rocket::build().mount(
+        "/",
+        routes![
+            index,
+            ping,
+            shutdown,
+            get_workload,
+            get_stats,
+            ensure_compilation,
+            test_compilation,
+            delete_compilation,
+            exec_and_wait
+        ],
+    )
 }
 
 #[cfg(test)]
