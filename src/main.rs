@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 #[macro_use]
@@ -20,7 +21,27 @@ type DemoID = String;
 type RunKey = String;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-struct RunParams {}
+#[serde(untagged)]
+enum ParamValue {
+    Bool(bool),
+    PosInt(u64),
+    NegInt(i64),
+    Float(f64),
+    String(String),
+}
+impl std::fmt::Display for ParamValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParamValue::Bool(v) => write!(f, "{}", v),
+            ParamValue::PosInt(v) => write!(f, "{}", v),
+            ParamValue::NegInt(v) => write!(f, "{}", v),
+            ParamValue::Float(v) => write!(f, "{}", v),
+            ParamValue::String(v) => write!(f, "{}", v),
+        }
+    }
+}
+
+type RunParams = HashMap<String, ParamValue>;
 
 type DDLRun = String;
 
@@ -237,10 +258,14 @@ async fn exec_and_wait(req: Json<ExecAndWaitRequest>) -> Json<ExecAndWaitRespons
     let options = Some(CreateContainerOptions {
         name: name.as_str(),
     });
-    let env_demoid = format!("IPOL_DEMOID={}", req.demo_id);
-    let env_key = format!("IPOL_KEY={}", req.key);
-    // TODO: params
-    let env = vec![env_demoid.as_str(), env_key.as_str()];
+    let mut env = vec![
+        format!("IPOL_DEMOID={}", req.demo_id),
+        format!("IPOL_KEY={}", req.key),
+    ];
+    for param in &req.params {
+        env.push(format!("{}={}", param.0, param.1));
+    }
+    let env = env.iter().map(|s| s as &str).collect();
     let config = Config {
         image: Some(image_name.as_str()),
         // TODO: uid:gid from a config file
@@ -372,8 +397,15 @@ mod test {
             .json(&ExecAndWaitRequest {
                 demo_id: "t001".into(),
                 key: "test_exec_and_wait".into(),
-                params: RunParams {},
-                ddl_run: "echo foo; sleep 2; echo bar".into(),
+                params: RunParams::from([
+                    ("x".into(), ParamValue::PosInt(1)),
+                    ("y".into(), ParamValue::Float(2.5)),
+                    ("z".into(), ParamValue::String("hello".into())),
+                    ("a".into(), ParamValue::Bool(true)),
+                    ("b".into(), ParamValue::NegInt(-2)),
+                    ("param space".into(), ParamValue::String("hi world".into())),
+                ]),
+                ddl_run: "echo foo; sleep 2; env; echo a=$a and z=$z".into(),
                 timeout: Duration::from_secs(10),
             })
             .dispatch();
