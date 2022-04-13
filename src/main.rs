@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
-use std::time::Duration;
 
 #[macro_use]
 extern crate rocket;
+use rocket::form::Form;
 use rocket::http::hyper::Body;
 use rocket::serde::json::{Json, Value};
 use rocket::serde::{Deserialize, Serialize};
@@ -56,14 +56,14 @@ struct DDLBuild {
 
 #[derive(Debug, Serialize)]
 struct PingResponse {
-    message: String,
+    status: String,
     ping: String,
 }
 
-#[post("/ping")]
+#[get("/ping")]
 fn ping() -> Json<PingResponse> {
     Json(PingResponse {
-        message: "OK".into(),
+        status: "OK".into(),
         ping: "pong".into(),
     })
 }
@@ -105,10 +105,10 @@ fn get_stats() -> Json<Stats> {
     todo!();
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, FromForm)]
 struct EnsureCompilationRequest {
     demo_id: DemoID,
-    ddl_build: DDLBuild,
+    ddl_build: Json<DDLBuild>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -119,9 +119,9 @@ struct EnsureCompilationResponse {
 
 #[post("/ensure_compilation", data = "<req>")]
 async fn ensure_compilation(
-    req: Json<EnsureCompilationRequest>,
+    req: Form<EnsureCompilationRequest>,
 ) -> Json<EnsureCompilationResponse> {
-    dbg!(req.clone());
+    dbg!(&req);
 
     let dst_path = dirs::cache_dir()
         .unwrap()
@@ -135,6 +135,7 @@ async fn ensure_compilation(
     let mut buildlog = std::fs::File::create(logdir.join("build.log")).unwrap();
 
     // TODO: detect if we actually need to recompile
+    // TODO: if the url changes, reclone
 
     let repo = if !std::path::Path::new(&dst_path).exists() {
         let url = req.ddl_build.url.clone();
@@ -171,6 +172,8 @@ async fn ensure_compilation(
         repo.set_head_detached(object.id())
             .expect("Failed to set HEAD");
     }
+
+    // TODO: check that the dockerfile exists
 
     let vec = {
         let mut ar = Builder::new(Vec::new());
@@ -239,15 +242,13 @@ fn delete_compilation(req: Json<DeleteCompilationRequest>) {
     todo!();
 }
 
-#[serde_with::serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, FromForm)]
 struct ExecAndWaitRequest {
     demo_id: DemoID,
     key: RunKey,
-    params: RunParams,
-    ddl_run: DDLRun,
-    #[serde_as(as = "serde_with::DurationSeconds<u64>")]
-    timeout: Duration,
+    params: Json<RunParams>,
+    ddl_run: Json<DDLRun>,
+    timeout: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -257,8 +258,8 @@ struct ExecAndWaitResponse {
 }
 
 #[post("/exec_and_wait", data = "<req>")]
-async fn exec_and_wait(req: Json<ExecAndWaitRequest>) -> Json<ExecAndWaitResponse> {
-    dbg!(req.clone());
+async fn exec_and_wait(req: Form<ExecAndWaitRequest>) -> Json<ExecAndWaitResponse> {
+    dbg!(&req);
 
     let image_name = format!("ipol-demo-{}", req.demo_id);
     // TODO: use the usual exec folder and check that that the current run exists
@@ -289,7 +290,7 @@ async fn exec_and_wait(req: Json<ExecAndWaitRequest>) -> Json<ExecAndWaitRespons
         format!("IPOL_DEMOID={}", req.demo_id),
         format!("IPOL_KEY={}", req.key),
     ];
-    for (name, value) in &req.params {
+    for (name, value) in req.params.clone() {
         env.push(format!("{}={}", name, value));
     }
     let env = env.iter().map(|s| s as &str).collect();
@@ -355,27 +356,42 @@ fn index() -> &'static str {
 
 #[launch]
 fn rocket() -> _ {
-    rocket::build().mount(
-        "/",
-        routes![
-            index,
-            ping,
-            shutdown,
-            get_workload,
-            get_stats,
-            ensure_compilation,
-            test_compilation,
-            delete_compilation,
-            exec_and_wait
-        ],
-    )
+    rocket::build()
+        .mount(
+            "/api/demorunner/",
+            routes![
+                index,
+                ping,
+                shutdown,
+                get_workload,
+                get_stats,
+                ensure_compilation,
+                test_compilation,
+                delete_compilation,
+                exec_and_wait
+            ],
+        )
+        .mount(
+            "/api/demorunner-docker/",
+            routes![
+                index,
+                ping,
+                shutdown,
+                get_workload,
+                get_stats,
+                ensure_compilation,
+                test_compilation,
+                delete_compilation,
+                exec_and_wait
+            ],
+        )
 }
 
 #[cfg(test)]
 mod test {
     use super::rocket;
     use super::*;
-    use rocket::http::Status;
+    use rocket::http::{ContentType, Status};
     use rocket::local::blocking::Client;
 
     // TODO: remove git repositories and docker images
@@ -383,7 +399,7 @@ mod test {
     #[test]
     fn test_get_workfload() {
         let client = Client::tracked(rocket()).expect("valid rocket instance");
-        let response = client.get("/get_workload").dispatch();
+        let response = client.get("/api/demorunner/get_workload").dispatch();
         assert_eq!(response.status(), Status::Ok);
         assert_eq!(
             response.into_json(),
@@ -397,16 +413,19 @@ mod test {
     #[test]
     fn test_ensure_compilation() {
         let client = Client::tracked(rocket()).expect("valid rocket instance");
+        let ddl_build = DDLBuild {
+            url: "https://github.com/kidanger/ipol-demo-zero".into(),
+            rev: "origin/master".into(),
+            dockerfile: ".ipol/Dockerfile".into(),
+        };
         let response = client
-            .post("/ensure_compilation")
-            .json(&EnsureCompilationRequest {
-                demo_id: "t001".into(),
-                ddl_build: DDLBuild {
-                    url: "./ZERO".into(),
-                    rev: "origin/master".into(),
-                    dockerfile: "Dockerfile".into(),
-                },
-            })
+            .post("/api/demorunner/ensure_compilation")
+            .header(rocket::http::ContentType::Form)
+            .body(format!(
+                "demo_id={}&ddl_build={}",
+                "t001",
+                serde_json::to_string(&ddl_build).unwrap()
+            ))
             .dispatch();
         assert_eq!(response.status(), Status::Ok);
         assert_eq!(
@@ -420,23 +439,31 @@ mod test {
 
     #[test]
     fn test_exec_and_wait() {
+        let logdir = PathBuf::from("/tmp/t/exec");
+        std::fs::create_dir_all(&logdir).unwrap();
+
         let client = Client::tracked(rocket()).expect("valid rocket instance");
+
+        let params = RunParams::from([
+            ("x".into(), ParamValue::PosInt(1)),
+            ("y".into(), ParamValue::Float(2.5)),
+            ("z".into(), ParamValue::String("hello".into())),
+            ("a".into(), ParamValue::Bool(true)),
+            ("b".into(), ParamValue::NegInt(-2)),
+            ("param space".into(), ParamValue::String("hi world".into())),
+        ]);
+        let ddl_run = "echo foo; sleep 2; env; echo a=$a and z=$z";
         let response = client
-            .post("/exec_and_wait")
-            .json(&ExecAndWaitRequest {
-                demo_id: "t001".into(),
-                key: "test_exec_and_wait".into(),
-                params: RunParams::from([
-                    ("x".into(), ParamValue::PosInt(1)),
-                    ("y".into(), ParamValue::Float(2.5)),
-                    ("z".into(), ParamValue::String("hello".into())),
-                    ("a".into(), ParamValue::Bool(true)),
-                    ("b".into(), ParamValue::NegInt(-2)),
-                    ("param space".into(), ParamValue::String("hi world".into())),
-                ]),
-                ddl_run: "echo foo; sleep 2; env; echo a=$a and z=$z".into(),
-                timeout: Duration::from_secs(10),
-            })
+            .post("/api/demorunner/exec_and_wait")
+            .header(ContentType::Form)
+            .body(format!(
+                "demo_id={}&key={}&params={}&ddl_run={}&timeout={}",
+                "t001",
+                "test_exec_and_wait",
+                serde_json::to_string(&params).unwrap(),
+                serde_json::to_string(&ddl_run).unwrap(),
+                10,
+            ))
             .dispatch();
         assert_eq!(response.status(), Status::Ok);
         assert_eq!(
