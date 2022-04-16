@@ -239,22 +239,22 @@ async fn ensure_compilation(
 
 #[derive(Debug, Deserialize)]
 struct TestCompilationRequest {
-    ddl_build: DDLBuild,
-    compilation_path: String,
+    _ddl_build: DDLBuild,
+    _compilation_path: String,
 }
 
-#[post("/test_compilation", data = "<req>")]
-fn test_compilation(req: Json<TestCompilationRequest>) -> Value {
+#[post("/test_compilation", data = "<_req>")]
+fn test_compilation(_req: Json<TestCompilationRequest>) -> Value {
     todo!();
 }
 
 #[derive(Debug, Deserialize)]
 struct DeleteCompilationRequest {
-    demo_id: DemoID,
+    _demo_id: DemoID,
 }
 
-#[post("/delete_compilation", data = "<req>")]
-fn delete_compilation(req: Json<DeleteCompilationRequest>) {
+#[post("/delete_compilation", data = "<_req>")]
+fn delete_compilation(_req: Json<DeleteCompilationRequest>) {
     todo!();
 }
 
