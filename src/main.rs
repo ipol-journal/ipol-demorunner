@@ -135,11 +135,24 @@ struct EnsureCompilationResponse {
     message: String,
 }
 
-#[post("/ensure_compilation", data = "<req>")]
-async fn ensure_compilation(
+#[derive(Debug, thiserror::Error)]
+enum CompilationError {
+    #[error("Compilation error: {0}")]
+    CompilationError(String),
+    #[error("{0}")]
+    IO(#[from] std::io::Error),
+    #[error("{0}")]
+    Docker(#[from] bollard::errors::Error),
+    #[error("{0}")]
+    Git(#[from] git2::Error),
+    #[error("Couldn't find the dockerfile: {0}")]
+    MissingDockerfile(String),
+}
+
+async fn ensure_compilation_inner(
     req: Form<EnsureCompilationRequest>,
     config: &State<RunnerConfig>,
-) -> Json<EnsureCompilationResponse> {
+) -> Result<(), CompilationError> {
     dbg!(&req);
 
     // TODO: validate demo_id
@@ -147,61 +160,55 @@ async fn ensure_compilation(
     let compilation_path = PathBuf::from(&config.compilation_root).join(&req.demo_id);
     let srcdir = PathBuf::from(&compilation_path).join("src");
     let logfile = PathBuf::from(&compilation_path).join("build.log");
-    std::fs::create_dir_all(&compilation_path).unwrap();
-    let mut buildlog = std::fs::File::create(logfile).unwrap();
+    std::fs::create_dir_all(&compilation_path)?;
+    let mut buildlog = std::fs::File::create(logfile)?;
 
     // TODO: detect if we actually need to recompile
     // TODO: if the url changes, reclone
 
     let repo = if !std::path::Path::new(&srcdir).exists() {
-        let url = req.ddl_build.url.clone();
         // TODO: credentials
         // TODO: shallow clone
-        match Repository::clone_recurse(&url, &srcdir) {
-            Ok(repo) => repo,
-            Err(e) => panic!("failed to clone: {}", e),
-        }
+        Repository::clone_recurse(&req.ddl_build.url, &srcdir)?
     } else {
-        match Repository::open(&srcdir) {
-            Ok(repo) => repo,
-            Err(e) => panic!("failed to clone: {}", e),
-        }
+        Repository::open(&srcdir)?
     };
 
     {
-        let mut remote = repo
-            .find_remote("origin")
-            .expect("Failed to find remote 'origin'");
+        let mut remote = repo.find_remote("origin")?;
         // TODO: shallow fetch the rev
-        remote
-            .fetch(&["master"], None, None)
-            .expect("Failed to fetch 'origin'");
+        remote.fetch(&["master"], None, None)?;
     }
 
     {
         // TODO: support "master" as rev instead of "origin/master"
         let rev = req.ddl_build.rev.clone();
-        let object = repo.revparse_single(&rev).expect("Object not found");
+        let object = repo.revparse_single(&rev)?;
         dbg!(object.clone());
-        repo.checkout_tree(&object, None)
-            .expect("Failed to checkout");
-        repo.set_head_detached(object.id())
-            .expect("Failed to set HEAD");
+        repo.checkout_tree(&object, None)?;
+        repo.set_head_detached(object.id())?;
     }
 
     // TODO: check that the dockerfile exists
+    if !PathBuf::from(&srcdir)
+        .join(&req.ddl_build.dockerfile)
+        .exists()
+    {
+        return Err(CompilationError::MissingDockerfile(
+            req.ddl_build.dockerfile.clone(),
+        ));
+    }
 
     let vec = {
         let mut ar = Builder::new(Vec::new());
         // TODO: exclude .git
-        ar.append_dir_all(".", srcdir).unwrap();
-        let vec = ar.into_inner();
-        vec.unwrap()
+        ar.append_dir_all(".", srcdir)?;
+        ar.into_inner()?
     };
     let tar = Body::from(vec);
-    //std::fs::write("/tmp/code.tar", &vec.clone()).unwrap();
+    //std::fs::write("/tmp/code.tar", &vec.clone())?;
 
-    let docker = Docker::connect_with_socket_defaults().unwrap();
+    let docker = Docker::connect_with_socket_defaults()?;
     let image_name = format!("{}{}", config.docker_image_prefix, req.demo_id);
     let build_image_options = BuildImageOptions {
         dockerfile: req.ddl_build.dockerfile.as_str(),
@@ -215,26 +222,38 @@ async fn ensure_compilation(
     while let Some(msg) = image_build_stream.next().await {
         if let Ok(info) = msg {
             if let Some(stream) = info.stream {
-                buildlog.write_all(stream.as_bytes()).unwrap();
+                buildlog.write_all(stream.as_bytes())?;
             }
             if let Some(err) = info.error {
-                buildlog.write_all(err.as_bytes()).unwrap();
+                buildlog.write_all(err.as_bytes())?;
                 compilation_error = Some(err);
             }
         }
     }
 
-    Json(if let Some(err) = compilation_error {
-        EnsureCompilationResponse {
-            status: "KO".to_string(),
-            message: err,
-        }
+    if let Some(err) = compilation_error {
+        Err(CompilationError::CompilationError(err))
     } else {
-        EnsureCompilationResponse {
-            status: "OK".to_string(),
-            message: "".to_string(),
-        }
-    })
+        Ok(())
+    }
+}
+
+#[post("/ensure_compilation", data = "<req>")]
+async fn ensure_compilation(
+    req: Form<EnsureCompilationRequest>,
+    config: &State<RunnerConfig>,
+) -> Json<EnsureCompilationResponse> {
+    let response = match ensure_compilation_inner(req, config).await {
+        Ok(()) => EnsureCompilationResponse {
+            status: "OK".into(),
+            message: String::new(),
+        },
+        Err(err) => EnsureCompilationResponse {
+            status: "KO".into(),
+            message: err.to_string(),
+        },
+    };
+    Json(response)
 }
 
 #[derive(Debug, Deserialize)]
@@ -300,8 +319,8 @@ async fn exec_and_wait_inner(
     let image_name = format!("{}{}:latest", config.docker_image_prefix, req.demo_id);
     let exec_mountpoint = &config.exec_workdir_in_docker;
 
-    let mut stderr = std::fs::File::create(outdir.join("stderr.txt")).unwrap();
-    let mut stdout = std::fs::File::create(outdir.join("stdout.txt")).unwrap();
+    let mut stderr = std::fs::File::create(outdir.join("stderr.txt"))?;
+    let mut stdout = std::fs::File::create(outdir.join("stdout.txt"))?;
 
     let host_config = bollard::models::HostConfig {
         binds: Some(vec![format!(
@@ -367,11 +386,11 @@ async fn exec_and_wait_inner(
             match msg {
                 Ok(LogOutput::StdOut { message }) => {
                     println!("stdout: {message:#?}");
-                    stdout.write_all(&message).unwrap();
+                    stdout.write_all(&message)?;
                 }
                 Ok(LogOutput::StdErr { message }) => {
                     println!("stderr: {message:#?}");
-                    stderr.write_all(&message).unwrap();
+                    stderr.write_all(&message)?;
                 }
                 Ok(LogOutput::StdIn { message }) => {
                     println!("stdin: {message:#?}");
