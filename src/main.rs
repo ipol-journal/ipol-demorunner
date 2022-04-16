@@ -31,6 +31,7 @@ struct RunnerConfig {
     docker_image_prefix: String,
     docker_exec_prefix: String,
     exec_workdir_in_docker: String,
+    user_uid_gid: String,
 }
 
 //#[derive(Debug, Serialize, Deserialize, Display)]
@@ -272,11 +273,20 @@ struct ExecAndWaitResponse {
     message: String,
 }
 
-#[post("/exec_and_wait", data = "<req>")]
-async fn exec_and_wait(
+#[derive(Debug, thiserror::Error)]
+enum ExecError {
+    #[error("Non-zero exit code ({0})")]
+    NonZeroExitCode(i64),
+    #[error("{0}")]
+    IO(#[from] std::io::Error),
+    #[error("{0}")]
+    Docker(#[from] bollard::errors::Error),
+}
+
+async fn exec_and_wait_inner(
     req: Form<ExecAndWaitRequest>,
     config: &State<RunnerConfig>,
-) -> Json<ExecAndWaitResponse> {
+) -> Result<(), ExecError> {
     dbg!(&req);
 
     // TODO: validate demo_id and key
@@ -284,8 +294,8 @@ async fn exec_and_wait(
     let outdir = PathBuf::from(&config.execution_root)
         .join(&req.demo_id)
         .join(&req.key);
-    std::fs::create_dir_all(&outdir).unwrap();
-    let outdir = std::fs::canonicalize(outdir).unwrap();
+    std::fs::create_dir_all(&outdir)?;
+    let outdir = std::fs::canonicalize(outdir)?;
 
     let image_name = format!("{}{}:latest", config.docker_image_prefix, req.demo_id);
     let exec_mountpoint = &config.exec_workdir_in_docker;
@@ -316,8 +326,7 @@ async fn exec_and_wait(
     let env = env.iter().map(|s| s as &str).collect();
     let config = Config {
         image: Some(image_name.as_str()),
-        // TODO: uid:gid from a config file
-        user: Some("1000:1000"),
+        user: Some(&config.user_uid_gid),
         cmd: Some(vec!["/bin/bash", "-c", req.ddl_run.as_str()]),
         env: Some(env),
         working_dir: Some(exec_mountpoint),
@@ -325,8 +334,9 @@ async fn exec_and_wait(
         ..Default::default()
     };
 
-    let docker = Docker::connect_with_socket_defaults().unwrap();
-    let id = docker.create_container(options, config).await.unwrap().id;
+    let docker = Docker::connect_with_socket_defaults()?;
+    let id = docker.create_container(options, config).await?.id;
+    dbg!(&id);
 
     defer! {
         let docker = docker.clone();
@@ -336,13 +346,13 @@ async fn exec_and_wait(
                 force: true,
                 ..Default::default()
             });
-            docker.remove_container(&name, options).await.unwrap();
+            if let Err(e) = docker.remove_container(&name, options).await {
+                error!("{}", e);
+            }
         });
     }
 
-    docker.start_container::<String>(&id, None).await.unwrap();
-
-    dbg!(&id);
+    docker.start_container::<String>(&id, None).await?;
 
     {
         // TODO: handle timeout
@@ -377,21 +387,33 @@ async fn exec_and_wait(
     }
 
     let options = Some(InspectContainerOptions { size: false });
-    let inspect_response = docker.inspect_container(&name, options).await.unwrap();
-    let state = inspect_response.state.unwrap();
-    dbg!(&state);
+    let inspect_response = docker.inspect_container(&name, options).await?;
 
-    if state.exit_code != Some(0) {
-        return Json(ExecAndWaitResponse {
-            status: "KO".into(),
-            message: "".into(),
-        });
+    if let Some(exit_code) = (move || inspect_response.state?.exit_code)() {
+        if exit_code != 0 {
+            return Err(ExecError::NonZeroExitCode(exit_code));
+        }
     }
 
-    Json(ExecAndWaitResponse {
-        status: "OK".into(),
-        message: "".into(),
-    })
+    Ok(())
+}
+
+#[post("/exec_and_wait", data = "<req>")]
+async fn exec_and_wait(
+    req: Form<ExecAndWaitRequest>,
+    config: &State<RunnerConfig>,
+) -> Json<ExecAndWaitResponse> {
+    let response = match exec_and_wait_inner(req, config).await {
+        Ok(()) => ExecAndWaitResponse {
+            status: "OK".into(),
+            message: String::new(),
+        },
+        Err(err) => ExecAndWaitResponse {
+            status: "KO".into(),
+            message: err.to_string(),
+        },
+    };
+    Json(response)
 }
 
 #[get("/")]
@@ -514,6 +536,34 @@ mod test {
             Some(ExecAndWaitResponse {
                 status: "OK".into(),
                 message: "".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_exec_and_wait_non_zero_exit_code() {
+        let client = Client::tracked(rocket()).expect("valid rocket instance");
+
+        let params = RunParams::new();
+        let ddl_run = "exit 5";
+        let response = client
+            .post("/api/demorunner/exec_and_wait")
+            .header(ContentType::Form)
+            .body(format!(
+                "demo_id={}&key={}&params={}&ddl_run={}&timeout={}",
+                "t001",
+                "test_exec_and_wait_non_zero_exit_code",
+                serde_json::to_string(&params).unwrap(),
+                serde_json::to_string(&ddl_run).unwrap(),
+                10,
+            ))
+            .dispatch();
+        assert_eq!(response.status(), Status::Ok);
+        assert_eq!(
+            response.into_json(),
+            Some(ExecAndWaitResponse {
+                status: "KO".into(),
+                message: "Non-zero exit code (5)".into(),
             })
         );
     }
