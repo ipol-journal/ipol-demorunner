@@ -145,7 +145,7 @@ enum CompilationError {
     Docker(#[from] bollard::errors::Error),
     #[error("{0}")]
     Git(#[from] git2::Error),
-    #[error("Couldn't find the dockerfile: {0}")]
+    #[error("Couldn't find dockerfile: {0}")]
     MissingDockerfile(String),
 }
 
@@ -520,6 +520,61 @@ mod test {
             Some(EnsureCompilationResponse {
                 status: "OK".into(),
                 message: "".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_ensure_compilation_missing_dockerfile() {
+        let client = Client::tracked(rocket()).expect("valid rocket instance");
+        let ddl_build = DDLBuild {
+            url: "https://github.com/kidanger/ipol-demo-zero".into(),
+            rev: "69b4dbc2ff9c3102c3b86639ed1ab608a6b5ba79".into(),
+            dockerfile: "missing".into(),
+        };
+        let response = client
+            .post("/api/demorunner/ensure_compilation")
+            .header(rocket::http::ContentType::Form)
+            .body(format!(
+                "demo_id={}&ddl_build={}",
+                "t002",
+                serde_json::to_string(&ddl_build).unwrap()
+            ))
+            .dispatch();
+        assert_eq!(response.status(), Status::Ok);
+        assert_eq!(
+            response.into_json(),
+            Some(EnsureCompilationResponse {
+                status: "KO".into(),
+                message: "Couldn't find dockerfile: missing".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_ensure_compilation_invalid_git_commit() {
+        let client = Client::tracked(rocket()).expect("valid rocket instance");
+        let ddl_build = DDLBuild {
+            url: "https://github.com/kidanger/ipol-demo-zero".into(),
+            rev: "invalid".into(),
+            dockerfile: ".ipol/Dockerfile".into(),
+        };
+        let response = client
+            .post("/api/demorunner/ensure_compilation")
+            .header(rocket::http::ContentType::Form)
+            .body(format!(
+                "demo_id={}&ddl_build={}",
+                "t003",
+                serde_json::to_string(&ddl_build).unwrap()
+            ))
+            .dispatch();
+        assert_eq!(response.status(), Status::Ok);
+        assert_eq!(
+            response.into_json(),
+            Some(EnsureCompilationResponse {
+                status: "KO".into(),
+                message: "revspec 'invalid' not found; class=Reference (4); code=NotFound (-3)"
+                    .into(),
             })
         );
     }
