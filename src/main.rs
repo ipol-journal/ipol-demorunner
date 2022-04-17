@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[macro_use]
@@ -173,6 +173,46 @@ enum CompilationError {
     MissingDockerfile(String),
 }
 
+fn url_of_git_repository(srcdir: &Path) -> Option<String> {
+    let repo = Repository::open(srcdir).ok()?;
+    let remote = repo.find_remote("origin").ok()?;
+    let url = remote.url()?;
+    Some(String::from(url))
+}
+
+fn prepare_git(path: &Path, url: &str, rev: &str) -> Result<(), CompilationError> {
+    if let Some(current_url) = url_of_git_repository(path) {
+        if current_url != url {
+            std::fs::remove_dir_all(path)?;
+        }
+    } else if path.exists() {
+        std::fs::remove_dir_all(path)?;
+    }
+
+    let repo = if !path.exists() {
+        // TODO: credentials
+        // TODO: shallow clone
+        Repository::clone_recurse(url, path)?
+    } else {
+        Repository::open(path)?
+    };
+
+    {
+        let mut remote = repo.find_remote("origin")?;
+        // TODO: shallow fetch the rev
+        remote.fetch(&["master"], None, None)?;
+    }
+
+    {
+        // TODO: support "master" as rev instead of "origin/master"
+        let object = repo.revparse_single(rev)?;
+        dbg!(object.clone());
+        repo.checkout_tree(&object, None)?;
+        repo.set_head_detached(object.id())?;
+    }
+    Ok(())
+}
+
 async fn ensure_compilation_inner(
     req: Form<EnsureCompilationRequest>,
     config: &State<RunnerConfig>,
@@ -186,37 +226,13 @@ async fn ensure_compilation_inner(
     let mut buildlog = fs::File::create(logfile).await?;
 
     // TODO: detect if we actually need to recompile
-    // TODO: if the url changes, reclone
 
     {
         let srcdir = srcdir.clone();
         let ddl_build = req.ddl_build.clone();
-        tokio::task::spawn_blocking(move || -> Result<(), CompilationError> {
-            let repo = if !std::path::Path::new(&srcdir).exists() {
-                // TODO: credentials
-                // TODO: shallow clone
-                Repository::clone_recurse(&ddl_build.url, &srcdir)?
-            } else {
-                Repository::open(&srcdir)?
-            };
-
-            {
-                let mut remote = repo.find_remote("origin")?;
-                // TODO: shallow fetch the rev
-                remote.fetch(&["master"], None, None)?;
-            }
-
-            {
-                // TODO: support "master" as rev instead of "origin/master"
-                let object = repo.revparse_single(&ddl_build.rev)?;
-                dbg!(object.clone());
-                repo.checkout_tree(&object, None)?;
-                repo.set_head_detached(object.id())?;
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Interrupted, e))??;
+        tokio::task::spawn_blocking(move || prepare_git(&srcdir, &ddl_build.url, &ddl_build.rev))
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Interrupted, e))??;
     }
 
     if !PathBuf::from(&srcdir)
@@ -708,5 +724,29 @@ mod test {
             })
         );
         std::thread::sleep(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_url_of_git_repository() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let path = tmpdir.path();
+        let url = url_of_git_repository(path);
+        assert_eq!(url, None);
+
+        let url1 = String::from("https://github.com/kidanger/ipol-demo-zero");
+        let r = prepare_git(path, &url1, "master");
+        dbg!(&r);
+        assert!(r.is_ok());
+
+        let url = url_of_git_repository(path);
+        assert_eq!(url, Some(url1));
+
+        let url2 = String::from("https://github.com/kidanger/ipol-demo-zero.git");
+        let r = prepare_git(path, &url2, "master");
+        dbg!(&r);
+        assert!(r.is_ok());
+
+        let url = url_of_git_repository(path);
+        assert_eq!(url, Some(url2));
     }
 }
