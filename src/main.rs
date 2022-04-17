@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::PathBuf;
 
 #[macro_use]
@@ -9,7 +8,9 @@ use rocket::form::{self, Form};
 use rocket::http::hyper::Body;
 use rocket::serde::json::{Json, Value};
 use rocket::serde::{Deserialize, Serialize};
-use rocket::State;
+use rocket::tokio::fs;
+use rocket::tokio::io::AsyncWriteExt;
+use rocket::{tokio, State};
 
 #[macro_use(defer)]
 extern crate scopeguard;
@@ -178,36 +179,43 @@ async fn ensure_compilation_inner(
     let compilation_path = PathBuf::from(&config.compilation_root).join(&req.demo_id);
     let srcdir = PathBuf::from(&compilation_path).join("src");
     let logfile = PathBuf::from(&compilation_path).join("build.log");
-    std::fs::create_dir_all(&compilation_path)?;
-    let mut buildlog = std::fs::File::create(logfile)?;
+    fs::create_dir_all(&compilation_path).await?;
+    let mut buildlog = fs::File::create(logfile).await?;
 
     // TODO: detect if we actually need to recompile
     // TODO: if the url changes, reclone
 
-    let repo = if !std::path::Path::new(&srcdir).exists() {
-        // TODO: credentials
-        // TODO: shallow clone
-        Repository::clone_recurse(&req.ddl_build.url, &srcdir)?
-    } else {
-        Repository::open(&srcdir)?
-    };
-
     {
-        let mut remote = repo.find_remote("origin")?;
-        // TODO: shallow fetch the rev
-        remote.fetch(&["master"], None, None)?;
+        let srcdir = srcdir.clone();
+        let ddl_build = req.ddl_build.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), CompilationError> {
+            let repo = if !std::path::Path::new(&srcdir).exists() {
+                // TODO: credentials
+                // TODO: shallow clone
+                Repository::clone_recurse(&ddl_build.url, &srcdir)?
+            } else {
+                Repository::open(&srcdir)?
+            };
+
+            {
+                let mut remote = repo.find_remote("origin")?;
+                // TODO: shallow fetch the rev
+                remote.fetch(&["master"], None, None)?;
+            }
+
+            {
+                // TODO: support "master" as rev instead of "origin/master"
+                let object = repo.revparse_single(&ddl_build.rev)?;
+                dbg!(object.clone());
+                repo.checkout_tree(&object, None)?;
+                repo.set_head_detached(object.id())?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Interrupted, e))??;
     }
 
-    {
-        // TODO: support "master" as rev instead of "origin/master"
-        let rev = req.ddl_build.rev.clone();
-        let object = repo.revparse_single(&rev)?;
-        dbg!(object.clone());
-        repo.checkout_tree(&object, None)?;
-        repo.set_head_detached(object.id())?;
-    }
-
-    // TODO: check that the dockerfile exists
     if !PathBuf::from(&srcdir)
         .join(&req.ddl_build.dockerfile)
         .exists()
@@ -218,13 +226,17 @@ async fn ensure_compilation_inner(
     }
 
     let vec = {
-        let mut ar = Builder::new(Vec::new());
-        // TODO: exclude .git
-        ar.append_dir_all(".", srcdir)?;
-        ar.into_inner()?
+        let srcdir = srcdir.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CompilationError> {
+            let mut ar = Builder::new(Vec::new());
+            // TODO: exclude .git
+            ar.append_dir_all(".", srcdir)?;
+            Ok(ar.into_inner()?)
+        })
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Interrupted, e))??
     };
     let tar = Body::from(vec);
-    //std::fs::write("/tmp/code.tar", &vec.clone())?;
 
     let docker = Docker::connect_with_socket_defaults()?;
     let image_name = format!("{}{}", config.docker_image_prefix, req.demo_id);
@@ -240,10 +252,10 @@ async fn ensure_compilation_inner(
     while let Some(msg) = image_build_stream.next().await {
         if let Ok(info) = msg {
             if let Some(stream) = info.stream {
-                buildlog.write_all(stream.as_bytes())?;
+                buildlog.write_all(stream.as_bytes()).await?;
             }
             if let Some(err) = info.error {
-                buildlog.write_all(err.as_bytes())?;
+                buildlog.write_all(err.as_bytes()).await?;
                 compilation_error = Some(err);
             }
         }
@@ -328,19 +340,17 @@ async fn exec_and_wait_inner(
 ) -> Result<(), ExecError> {
     dbg!(&req);
 
-    // TODO: validate demo_id and key
-
     let outdir = PathBuf::from(&config.execution_root)
         .join(&req.demo_id)
         .join(&req.key);
-    std::fs::create_dir_all(&outdir)?;
-    let outdir = std::fs::canonicalize(outdir)?;
+    fs::create_dir_all(&outdir).await?;
+    let outdir = fs::canonicalize(outdir).await?;
 
     let image_name = format!("{}{}:latest", config.docker_image_prefix, req.demo_id);
     let exec_mountpoint = &config.exec_workdir_in_docker;
 
-    let mut stderr = std::fs::File::create(outdir.join("stderr.txt"))?;
-    let mut stdout = std::fs::File::create(outdir.join("stdout.txt"))?;
+    let mut stderr = fs::File::create(outdir.join("stderr.txt")).await?;
+    let mut stdout = fs::File::create(outdir.join("stdout.txt")).await?;
 
     let host_config = bollard::models::HostConfig {
         binds: Some(vec![format!(
@@ -406,11 +416,11 @@ async fn exec_and_wait_inner(
             match msg {
                 Ok(LogOutput::StdOut { message }) => {
                     println!("stdout: {message:#?}");
-                    stdout.write_all(&message)?;
+                    stdout.write_all(&message).await?;
                 }
                 Ok(LogOutput::StdErr { message }) => {
                     println!("stderr: {message:#?}");
-                    stderr.write_all(&message)?;
+                    stderr.write_all(&message).await?;
                 }
                 Ok(LogOutput::StdIn { message }) => {
                     println!("stdin: {message:#?}");
