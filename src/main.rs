@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[macro_use]
 extern crate rocket;
 use rocket::fairing::AdHoc;
-use rocket::form::Form;
+use rocket::form::{self, Form};
 use rocket::http::hyper::Body;
 use rocket::serde::json::{Json, Value};
 use rocket::serde::{Deserialize, Serialize};
@@ -13,12 +13,13 @@ use rocket::State;
 
 #[macro_use(defer)]
 extern crate scopeguard;
-
 use bollard::container::{
     Config, CreateContainerOptions, InspectContainerOptions, LogOutput, LogsOptions,
     RemoveContainerOptions,
 };
 use bollard::{image::BuildImageOptions, Docker};
+use lazy_static::lazy_static;
+use regex::Regex;
 
 use futures_util::stream::StreamExt;
 use git2::Repository;
@@ -34,11 +35,29 @@ struct RunnerConfig {
     user_uid_gid: String,
 }
 
-//#[derive(Debug, Serialize, Deserialize, Display)]
 type DemoID = String;
 
-//#[derive(Debug, Serialize, Deserialize, Display)]
+fn validate_demoid<'v>(s: &str) -> form::Result<'v, ()> {
+    lazy_static! {
+        static ref RE: Regex = Regex::new(r"^\w+$").unwrap();
+    }
+    if !RE.is_match(s) {
+        return Err(rocket::form::Error::validation("invalid demo_id").into());
+    }
+    Ok(())
+}
+
 type RunKey = String;
+
+fn validate_runkey<'v>(s: &str) -> form::Result<'v, ()> {
+    lazy_static! {
+        static ref RE: Regex = Regex::new(r"^\w+$").unwrap();
+    }
+    if !RE.is_match(s) {
+        return Err(rocket::form::Error::validation("invalid key").into());
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
@@ -125,6 +144,7 @@ fn get_stats() -> Json<Stats> {
 
 #[derive(Debug, FromForm)]
 struct EnsureCompilationRequest {
+    #[field(validate=validate_demoid())]
     demo_id: DemoID,
     ddl_build: Json<DDLBuild>,
 }
@@ -138,7 +158,7 @@ struct EnsureCompilationResponse {
 #[derive(Debug, thiserror::Error)]
 enum CompilationError {
     #[error("Compilation error: {0}")]
-    CompilationError(String),
+    BuildError(String),
     #[error("{0}")]
     IO(#[from] std::io::Error),
     #[error("{0}")]
@@ -154,8 +174,6 @@ async fn ensure_compilation_inner(
     config: &State<RunnerConfig>,
 ) -> Result<(), CompilationError> {
     dbg!(&req);
-
-    // TODO: validate demo_id
 
     let compilation_path = PathBuf::from(&config.compilation_root).join(&req.demo_id);
     let srcdir = PathBuf::from(&compilation_path).join("src");
@@ -232,7 +250,7 @@ async fn ensure_compilation_inner(
     }
 
     if let Some(err) = compilation_error {
-        Err(CompilationError::CompilationError(err))
+        Err(CompilationError::BuildError(err))
     } else {
         Ok(())
     }
@@ -279,7 +297,9 @@ fn delete_compilation(_req: Json<DeleteCompilationRequest>) {
 
 #[derive(Debug, FromForm)]
 struct ExecAndWaitRequest {
+    #[field(validate=validate_demoid())]
     demo_id: DemoID,
+    #[field(validate=validate_runkey())]
     key: RunKey,
     params: Json<RunParams>,
     ddl_run: Json<DDLRun>,
