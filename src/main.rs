@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[macro_use]
 extern crate rocket;
@@ -10,6 +11,8 @@ use rocket::serde::json::{Json, Value};
 use rocket::serde::{Deserialize, Serialize};
 use rocket::tokio::fs;
 use rocket::tokio::io::AsyncWriteExt;
+use rocket::tokio::time::error::Elapsed;
+use rocket::tokio::time::{timeout_at, Instant};
 use rocket::{tokio, State};
 
 #[macro_use(defer)]
@@ -332,6 +335,8 @@ enum ExecError {
     IO(#[from] std::io::Error),
     #[error("{0}")]
     Docker(#[from] bollard::errors::Error),
+    #[error("Execution timeout")]
+    Timeout(#[from] Elapsed),
 }
 
 async fn exec_and_wait_inner(
@@ -403,8 +408,8 @@ async fn exec_and_wait_inner(
 
     docker.start_container::<String>(&id, None).await?;
 
-    {
-        // TODO: handle timeout
+    let deadline = Instant::now() + Duration::from_secs(req.timeout);
+    timeout_at(deadline, async {
         let options = Some(LogsOptions::<String> {
             follow: true,
             stdout: true,
@@ -433,7 +438,9 @@ async fn exec_and_wait_inner(
                 }
             };
         }
-    }
+        Ok::<(), ExecError>(())
+    })
+    .await??;
 
     let options = Some(InspectContainerOptions { size: false });
     let inspect_response = docker.inspect_container(&name, options).await?;
@@ -642,6 +649,7 @@ mod test {
                 message: "".into(),
             })
         );
+        std::thread::sleep(Duration::from_secs(1));
     }
 
     #[test]
@@ -670,5 +678,35 @@ mod test {
                 message: "Non-zero exit code (5)".into(),
             })
         );
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_exec_and_wait_timeout() {
+        let client = Client::tracked(rocket()).expect("valid rocket instance");
+
+        let params = RunParams::new();
+        let ddl_run = "echo bla; sleep 2; echo blo";
+        let response = client
+            .post("/api/demorunner/exec_and_wait")
+            .header(ContentType::Form)
+            .body(format!(
+                "demo_id={}&key={}&params={}&ddl_run={}&timeout={}",
+                "t001",
+                "test_exec_and_wait_timeout",
+                serde_json::to_string(&params).unwrap(),
+                serde_json::to_string(&ddl_run).unwrap(),
+                1,
+            ))
+            .dispatch();
+        assert_eq!(response.status(), Status::Ok);
+        assert_eq!(
+            response.into_json(),
+            Some(ExecAndWaitResponse {
+                status: "KO".into(),
+                message: "Execution timeout".into(),
+            })
+        );
+        std::thread::sleep(Duration::from_secs(1));
     }
 }
