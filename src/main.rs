@@ -115,8 +115,11 @@ struct ShutdownResponse {
 }
 
 #[get("/shutdown")]
-fn shutdown() -> Json<ShutdownResponse> {
-    todo!();
+fn shutdown(shutdown: rocket::Shutdown) -> Json<ShutdownResponse> {
+    shutdown.notify();
+    Json(ShutdownResponse {
+        status: "OK".into(),
+    })
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -495,6 +498,7 @@ fn index() -> &'static str {
 
 #[launch]
 fn rocket() -> _ {
+    // TODO: restrict access to the service somehow
     rocket::build()
         .mount(
             "/api/demorunner/",
