@@ -147,11 +147,13 @@ struct EnsureCompilationRequest {
 struct EnsureCompilationResponse {
     status: String,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    buildlog: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
 enum CompilationError {
-    #[error("Compilation error: {0}")]
+    #[error("Compilation error")]
     BuildError(String),
     #[error("{0}")]
     IO(#[from] std::io::Error),
@@ -215,7 +217,7 @@ async fn ensure_compilation_inner(
     fs::create_dir_all(&compilation_path).await?;
     let mut buildlog = fs::File::create(logfile).await?;
 
-    // TODO: detect if we actually need to recompile
+    // TODO: detect if we actually need to recompile (iif a rev is specified)
 
     {
         let srcdir = srcdir.clone();
@@ -255,23 +257,25 @@ async fn ensure_compilation_inner(
         q: false,
         ..Default::default()
     };
-    let mut image_build_stream = docker.build_image(build_image_options, None, Some(tar));
 
-    let mut compilation_error = None;
+    let mut image_build_stream = docker.build_image(build_image_options, None, Some(tar));
+    let mut buildlogbuf = String::new();
+    let mut errored = false;
     while let Some(msg) = image_build_stream.next().await {
-        if let Ok(info) = msg {
-            if let Some(stream) = info.stream {
-                buildlog.write_all(stream.as_bytes()).await?;
-            }
-            if let Some(err) = info.error {
-                buildlog.write_all(err.as_bytes()).await?;
-                compilation_error = Some(err);
-            }
+        let info = msg?;
+        if let Some(stream) = info.stream {
+            buildlog.write_all(stream.as_bytes()).await?;
+            buildlogbuf.push_str(&stream);
+        }
+        if let Some(err) = info.error {
+            buildlog.write_all(err.as_bytes()).await?;
+            buildlogbuf.push_str(&err);
+            errored = true;
         }
     }
 
-    if let Some(err) = compilation_error {
-        Err(CompilationError::BuildError(err))
+    if errored {
+        Err(CompilationError::BuildError(buildlogbuf))
     } else {
         Ok(())
     }
@@ -286,10 +290,19 @@ async fn ensure_compilation(
         Ok(()) => EnsureCompilationResponse {
             status: "OK".into(),
             message: String::new(),
+            buildlog: None,
         },
-        Err(err) => EnsureCompilationResponse {
-            status: "KO".into(),
-            message: err.to_string(),
+        Err(err) => match err {
+            CompilationError::BuildError(ref buildlog) => EnsureCompilationResponse {
+                status: "KO".into(),
+                message: err.to_string(),
+                buildlog: Some(buildlog.clone()),
+            },
+            _ => EnsureCompilationResponse {
+                status: "KO".into(),
+                message: err.to_string(),
+                buildlog: None,
+            },
         },
     };
     Json(response)
@@ -310,6 +323,9 @@ struct ExecAndWaitRequest {
 struct ExecAndWaitResponse {
     status: String,
     message: String,
+    // TODO:
+    // algo_info -> error_message/run_time
+    // error
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -499,6 +515,8 @@ mod test {
     use rocket::http::{ContentType, Status};
     use rocket::local::blocking::Client;
 
+    const GIT_URL: &str = "https://github.com/kidanger/ipol-demo-zero";
+
     // TODO: remove git repositories and docker images
 
     #[test]
@@ -519,7 +537,7 @@ mod test {
     fn test_ensure_compilation() {
         let client = Client::tracked(rocket()).expect("valid rocket instance");
         let ddl_build = DDLBuild {
-            url: "https://github.com/kidanger/ipol-demo-zero".into(),
+            url: GIT_URL.into(),
             rev: "69b4dbc2ff9c3102c3b86639ed1ab608a6b5ba79".into(),
             dockerfile: ".ipol/Dockerfile".into(),
         };
@@ -538,6 +556,7 @@ mod test {
             Some(EnsureCompilationResponse {
                 status: "OK".into(),
                 message: "".into(),
+                buildlog: None,
             })
         );
     }
@@ -546,7 +565,7 @@ mod test {
     fn test_ensure_compilation_missing_dockerfile() {
         let client = Client::tracked(rocket()).expect("valid rocket instance");
         let ddl_build = DDLBuild {
-            url: "https://github.com/kidanger/ipol-demo-zero".into(),
+            url: GIT_URL.into(),
             rev: "69b4dbc2ff9c3102c3b86639ed1ab608a6b5ba79".into(),
             dockerfile: "missing".into(),
         };
@@ -565,6 +584,7 @@ mod test {
             Some(EnsureCompilationResponse {
                 status: "KO".into(),
                 message: "Couldn't find dockerfile: missing".into(),
+                buildlog: None,
             })
         );
     }
@@ -573,7 +593,7 @@ mod test {
     fn test_ensure_compilation_invalid_git_commit() {
         let client = Client::tracked(rocket()).expect("valid rocket instance");
         let ddl_build = DDLBuild {
-            url: "https://github.com/kidanger/ipol-demo-zero".into(),
+            url: GIT_URL.into(),
             rev: "invalid".into(),
             dockerfile: ".ipol/Dockerfile".into(),
         };
@@ -593,8 +613,62 @@ mod test {
                 status: "KO".into(),
                 message: "revspec 'invalid' not found; class=Reference (4); code=NotFound (-3)"
                     .into(),
+                buildlog: None,
             })
         );
+    }
+
+    #[test]
+    fn test_ensure_compilation_invalid_dockerfile() {
+        let client = Client::tracked(rocket()).expect("valid rocket instance");
+        let ddl_build = DDLBuild {
+            url: GIT_URL.into(),
+            rev: "69b4dbc2ff9c3102c3b86639ed1ab608a6b5ba79".into(),
+            dockerfile: "Makefile".into(),
+        };
+        let response = client
+            .post("/api/demorunner/ensure_compilation")
+            .header(rocket::http::ContentType::Form)
+            .body(format!(
+                "demo_id={}&ddl_build={}",
+                "t004",
+                serde_json::to_string(&ddl_build).unwrap()
+            ))
+            .dispatch();
+        assert_eq!(response.status(), Status::Ok);
+        assert_eq!(
+            response.into_json(),
+            Some(EnsureCompilationResponse {
+                status: "KO".into(),
+                message: "Docker responded with status code 400: dockerfile parse error line 1: unknown instruction: CFLAGS=".into(),
+                buildlog: None,
+            })
+        );
+    }
+
+    #[test]
+    fn test_ensure_compilation_build_error() {
+        let client = Client::tracked(rocket()).expect("valid rocket instance");
+        let ddl_build = DDLBuild {
+            url: GIT_URL.into(),
+            rev: "fe35687".into(),
+            dockerfile: ".ipol/Dockerfile-error".into(),
+        };
+        let response = client
+            .post("/api/demorunner/ensure_compilation")
+            .header(rocket::http::ContentType::Form)
+            .body(format!(
+                "demo_id={}&ddl_build={}",
+                "t005",
+                serde_json::to_string(&ddl_build).unwrap()
+            ))
+            .dispatch();
+        assert_eq!(response.status(), Status::Ok);
+
+        let r: EnsureCompilationResponse = response.into_json().unwrap();
+        assert_eq!(r.status, "KO");
+        assert_eq!(r.message, "Compilation error");
+        assert!(!r.buildlog.unwrap().is_empty());
     }
 
     #[test]
@@ -698,7 +772,7 @@ mod test {
         let url = url_of_git_repository(path);
         assert_eq!(url, None);
 
-        let url1 = String::from("https://github.com/kidanger/ipol-demo-zero");
+        let url1 = String::from(GIT_URL);
         let r = prepare_git(path, &url1, "master");
         dbg!(&r);
         assert!(r.is_ok());
@@ -706,7 +780,7 @@ mod test {
         let url = url_of_git_repository(path);
         assert_eq!(url, Some(url1));
 
-        let url2 = String::from("https://github.com/kidanger/ipol-demo-zero.git");
+        let url2 = format!("{}.git", GIT_URL);
         let r = prepare_git(path, &url2, "master");
         dbg!(&r);
         assert!(r.is_ok());
