@@ -7,7 +7,7 @@ extern crate rocket;
 use rocket::fairing::AdHoc;
 use rocket::form::{self, Form};
 use rocket::http::hyper::Body;
-use rocket::serde::json::{Json, Value};
+use rocket::serde::json::Json;
 use rocket::serde::{Deserialize, Serialize};
 use rocket::tokio::fs;
 use rocket::tokio::io::AsyncWriteExt;
@@ -134,19 +134,6 @@ fn get_workload() -> Json<Workload> {
         status: "OK".into(),
         workload: 1.0,
     })
-}
-
-#[derive(Debug, Serialize)]
-struct Stats {
-    status: String,
-    demo_id: DemoID,
-    key: RunKey,
-    date: String,
-}
-
-#[get("/get_stats")]
-fn get_stats() -> Json<Stats> {
-    todo!();
 }
 
 #[derive(Debug, FromForm)]
@@ -308,27 +295,6 @@ async fn ensure_compilation(
     Json(response)
 }
 
-#[derive(Debug, Deserialize)]
-struct TestCompilationRequest {
-    _ddl_build: DDLBuild,
-    _compilation_path: String,
-}
-
-#[post("/test_compilation", data = "<_req>")]
-fn test_compilation(_req: Json<TestCompilationRequest>) -> Value {
-    todo!();
-}
-
-#[derive(Debug, Deserialize)]
-struct DeleteCompilationRequest {
-    _demo_id: DemoID,
-}
-
-#[post("/delete_compilation", data = "<_req>")]
-fn delete_compilation(_req: Json<DeleteCompilationRequest>) {
-    todo!();
-}
-
 #[derive(Debug, FromForm)]
 struct ExecAndWaitRequest {
     #[field(validate=validate_demoid())]
@@ -362,6 +328,7 @@ async fn exec_and_wait_inner(
     req: Form<ExecAndWaitRequest>,
     config: &State<RunnerConfig>,
 ) -> Result<(), ExecError> {
+    // write to algo_info.txt
     dbg!(&req);
 
     let outdir = PathBuf::from(&config.execution_root)
@@ -507,10 +474,7 @@ fn rocket() -> _ {
                 ping,
                 shutdown,
                 get_workload,
-                get_stats,
                 ensure_compilation,
-                test_compilation,
-                delete_compilation,
                 exec_and_wait
             ],
         )
@@ -521,10 +485,7 @@ fn rocket() -> _ {
                 ping,
                 shutdown,
                 get_workload,
-                get_stats,
                 ensure_compilation,
-                test_compilation,
-                delete_compilation,
                 exec_and_wait
             ],
         )
