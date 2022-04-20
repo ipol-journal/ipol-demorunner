@@ -755,7 +755,7 @@ mod test {
 
         let key = "test_exec_and_wait_non_zero_exit_code".to_string();
         let params = RunParams::new();
-        let ddl_run = "exit 5";
+        let ddl_run = "echo a; exit 5; echo b;";
         let response = client
             .post("/api/demorunner/exec_and_wait")
             .header(ContentType::Form)
@@ -775,9 +775,9 @@ mod test {
                 status: "KO".into(),
                 key,
                 params,
-                error: "Non-zero exit code (5)".into(),
+                error: "Non-zero exit code (5): a\n".into(),
                 algo_info: AlgoInfo {
-                    error_message: "Non-zero exit code (5)".into(),
+                    error_message: "Non-zero exit code (5): a\n".into(),
                     run_time: 1.0,
                 },
             })
