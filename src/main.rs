@@ -172,7 +172,26 @@ fn url_of_git_repository(srcdir: &Path) -> Option<String> {
     Some(String::from(url))
 }
 
+// from https://docs.rs/git2/0.14.2/src/git2/repo.rs.html#328
+fn update_submodules(repo: &git2::Repository) -> Result<(), git2::Error> {
+    fn add_subrepos(repo: &Repository, list: &mut Vec<Repository>) -> Result<(), git2::Error> {
+        for mut subm in repo.submodules()? {
+            subm.update(true, None)?;
+            list.push(subm.open()?);
+        }
+        Ok(())
+    }
+
+    let mut repos = Vec::new();
+    add_subrepos(repo, &mut repos)?;
+    while let Some(repo) = repos.pop() {
+        add_subrepos(&repo, &mut repos)?;
+    }
+    Ok(())
+}
+
 fn prepare_git(path: &Path, url: &str, rev: &str) -> Result<(), CompilationError> {
+    // NOTE: libgit2 does not support shallow fetches yet
     if let Some(current_url) = url_of_git_repository(path) {
         if current_url != url {
             std::fs::remove_dir_all(path)?;
@@ -181,18 +200,34 @@ fn prepare_git(path: &Path, url: &str, rev: &str) -> Result<(), CompilationError
         std::fs::remove_dir_all(path)?;
     }
 
+    let get_fetch_options = || {
+        let mut callbacks = git2::RemoteCallbacks::new();
+        callbacks.credentials(|_url, username_from_url, _allowed_types| {
+            git2::Cred::ssh_key(
+                username_from_url.unwrap(),
+                None,
+                Path::new(&format!("{}/.ssh/id_rsa", std::env::var("HOME").unwrap())),
+                None,
+            )
+        });
+        let mut fo = git2::FetchOptions::new();
+        fo.remote_callbacks(callbacks);
+        fo
+    };
+
     let repo = if !path.exists() {
-        // TODO: credentials
-        // TODO: shallow clone
-        Repository::clone_recurse(url, path)?
+        let fo = get_fetch_options();
+        let mut builder = git2::build::RepoBuilder::new();
+        builder.fetch_options(fo);
+        builder.clone(url, path)?
     } else {
         Repository::open(path)?
     };
 
     {
+        let mut fo = get_fetch_options();
         let mut remote = repo.find_remote("origin")?;
-        // TODO: shallow fetch the rev
-        remote.fetch(&["master"], None, None)?;
+        remote.fetch(&["master"], Some(&mut fo), None)?;
     }
 
     {
@@ -202,6 +237,9 @@ fn prepare_git(path: &Path, url: &str, rev: &str) -> Result<(), CompilationError
         repo.checkout_tree(&object, None)?;
         repo.set_head_detached(object.id())?;
     }
+
+    update_submodules(&repo)?;
+
     Ok(())
 }
 
@@ -322,7 +360,7 @@ struct ExecAndWaitRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct AlgoInfo {
     error_message: String,
-    run_time: f32,  // TODO: compute times
+    run_time: f32, // TODO: compute times
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -350,7 +388,7 @@ async fn exec_and_wait_inner(
     req: &ExecAndWaitRequest,
     config: &RunnerConfig,
 ) -> Result<(), ExecError> {
-    // write to algo_info.txt
+    // TODO: write to algo_info.txt?
     dbg!(&req);
 
     let outdir = PathBuf::from(&config.execution_root)
@@ -843,5 +881,18 @@ mod test {
 
         let url = url_of_git_repository(path);
         assert_eq!(url, Some(url2));
+    }
+
+    #[test]
+    fn test_prepare_git_private() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let path = tmpdir.path();
+
+        let urls = std::env::var("PRIVATE_URLS").unwrap_or_default();
+        for url in urls.split(',').filter(|x| !x.is_empty()) {
+            dbg!(url);
+            let r = prepare_git(path, url, "master");
+            assert!(r.is_ok());
+        }
     }
 }
