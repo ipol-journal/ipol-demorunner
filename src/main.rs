@@ -320,29 +320,35 @@ struct ExecAndWaitRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct AlgoInfo {
+    error_message: String,
+    run_time: f32,  // TODO: compute times
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct ExecAndWaitResponse {
+    key: RunKey,
+    params: RunParams,
     status: String,
-    message: String,
-    // TODO:
-    // algo_info -> error_message/run_time
-    // error
+    error: String,
+    algo_info: AlgoInfo,
 }
 
 #[derive(Debug, thiserror::Error)]
 enum ExecError {
-    #[error("Non-zero exit code ({0})")]
-    NonZeroExitCode(i64),
+    #[error("Non-zero exit code ({0}): {1}")]
+    NonZeroExitCode(i64, String),
     #[error("{0}")]
     IO(#[from] std::io::Error),
     #[error("{0}")]
     Docker(#[from] bollard::errors::Error),
-    #[error("Execution timeout")]
+    #[error("IPOLTimeoutError: Execution timeout")]
     Timeout(#[from] Elapsed),
 }
 
 async fn exec_and_wait_inner(
-    req: Form<ExecAndWaitRequest>,
-    config: &State<RunnerConfig>,
+    req: &ExecAndWaitRequest,
+    config: &RunnerConfig,
 ) -> Result<(), ExecError> {
     // write to algo_info.txt
     dbg!(&req);
@@ -376,6 +382,7 @@ async fn exec_and_wait_inner(
         format!("IPOL_DEMOID={}", req.demo_id),
         format!("IPOL_KEY={}", req.key),
     ];
+    // TODO: make sure we don't override any important variable
     for (name, value) in req.params.clone() {
         env.push(format!("{}={}", name, value));
     }
@@ -410,6 +417,7 @@ async fn exec_and_wait_inner(
 
     docker.start_container::<String>(&id, None).await?;
 
+    let mut output = String::new();
     let deadline = Instant::now() + Duration::from_secs(req.timeout);
     timeout_at(deadline, async {
         let options = Some(LogsOptions::<String> {
@@ -424,10 +432,12 @@ async fn exec_and_wait_inner(
                 Ok(LogOutput::StdOut { message }) => {
                     println!("stdout: {message:#?}");
                     stdout.write_all(&message).await?;
+                    output.push_str(&String::from_utf8_lossy(&message));
                 }
                 Ok(LogOutput::StdErr { message }) => {
                     println!("stderr: {message:#?}");
                     stderr.write_all(&message).await?;
+                    output.push_str(&String::from_utf8_lossy(&message));
                 }
                 Ok(LogOutput::StdIn { message }) => {
                     println!("stdin: {message:#?}");
@@ -449,7 +459,7 @@ async fn exec_and_wait_inner(
 
     if let Some(exit_code) = (move || inspect_response.state?.exit_code)() {
         if exit_code != 0 {
-            return Err(ExecError::NonZeroExitCode(exit_code));
+            return Err(ExecError::NonZeroExitCode(exit_code, output));
         }
     }
 
@@ -461,14 +471,39 @@ async fn exec_and_wait(
     req: Form<ExecAndWaitRequest>,
     config: &State<RunnerConfig>,
 ) -> Json<ExecAndWaitResponse> {
-    let response = match exec_and_wait_inner(req, config).await {
+    let rep = exec_and_wait_inner(&req, config).await;
+    let response = match rep {
         Ok(()) => ExecAndWaitResponse {
+            key: req.key.clone(),
+            params: req.params.clone(),
             status: "OK".into(),
-            message: String::new(),
+            error: String::new(),
+            algo_info: AlgoInfo {
+                error_message: String::new(),
+                run_time: 1.0,
+            },
         },
-        Err(err) => ExecAndWaitResponse {
-            status: "KO".into(),
-            message: err.to_string(),
+        Err(err) => match err {
+            ExecError::Timeout(_) => ExecAndWaitResponse {
+                key: req.key.clone(),
+                params: req.params.clone(),
+                status: "KO".into(),
+                error: "IPOLTimeoutError".into(),
+                algo_info: AlgoInfo {
+                    error_message: err.to_string(),
+                    run_time: 1.0,
+                },
+            },
+            _ => ExecAndWaitResponse {
+                key: req.key.clone(),
+                params: req.params.clone(),
+                status: "KO".into(),
+                error: err.to_string(),
+                algo_info: AlgoInfo {
+                    error_message: err.to_string(),
+                    run_time: 1.0,
+                },
+            },
         },
     };
     Json(response)
@@ -675,6 +710,7 @@ mod test {
     fn test_exec_and_wait() {
         let client = Client::tracked(rocket()).expect("valid rocket instance");
 
+        let key = "test_exec_and_wait".to_string();
         let params = RunParams::from([
             ("x".into(), ParamValue::PosInt(1)),
             ("y".into(), ParamValue::Float(2.5)),
@@ -690,7 +726,7 @@ mod test {
             .body(format!(
                 "demo_id={}&key={}&params={}&ddl_run={}&timeout={}",
                 "t001",
-                "test_exec_and_wait",
+                key,
                 serde_json::to_string(&params).unwrap(),
                 serde_json::to_string(&ddl_run).unwrap(),
                 10,
@@ -701,7 +737,13 @@ mod test {
             response.into_json(),
             Some(ExecAndWaitResponse {
                 status: "OK".into(),
-                message: "".into(),
+                error: "".into(),
+                key,
+                params,
+                algo_info: AlgoInfo {
+                    error_message: "".into(),
+                    run_time: 1.
+                }
             })
         );
         std::thread::sleep(Duration::from_secs(1));
@@ -711,6 +753,7 @@ mod test {
     fn test_exec_and_wait_non_zero_exit_code() {
         let client = Client::tracked(rocket()).expect("valid rocket instance");
 
+        let key = "test_exec_and_wait_non_zero_exit_code".to_string();
         let params = RunParams::new();
         let ddl_run = "exit 5";
         let response = client
@@ -719,7 +762,7 @@ mod test {
             .body(format!(
                 "demo_id={}&key={}&params={}&ddl_run={}&timeout={}",
                 "t001",
-                "test_exec_and_wait_non_zero_exit_code",
+                key,
                 serde_json::to_string(&params).unwrap(),
                 serde_json::to_string(&ddl_run).unwrap(),
                 10,
@@ -730,7 +773,13 @@ mod test {
             response.into_json(),
             Some(ExecAndWaitResponse {
                 status: "KO".into(),
-                message: "Non-zero exit code (5)".into(),
+                key,
+                params,
+                error: "Non-zero exit code (5)".into(),
+                algo_info: AlgoInfo {
+                    error_message: "Non-zero exit code (5)".into(),
+                    run_time: 1.0,
+                },
             })
         );
         std::thread::sleep(Duration::from_secs(1));
@@ -740,6 +789,7 @@ mod test {
     fn test_exec_and_wait_timeout() {
         let client = Client::tracked(rocket()).expect("valid rocket instance");
 
+        let key = "test_exec_and_wait_timeout".to_string();
         let params = RunParams::new();
         let ddl_run = "echo bla; sleep 2; echo blo";
         let response = client
@@ -748,7 +798,7 @@ mod test {
             .body(format!(
                 "demo_id={}&key={}&params={}&ddl_run={}&timeout={}",
                 "t001",
-                "test_exec_and_wait_timeout",
+                key,
                 serde_json::to_string(&params).unwrap(),
                 serde_json::to_string(&ddl_run).unwrap(),
                 1,
@@ -759,7 +809,13 @@ mod test {
             response.into_json(),
             Some(ExecAndWaitResponse {
                 status: "KO".into(),
-                message: "Execution timeout".into(),
+                key,
+                params,
+                error: "IPOLTimeoutError".into(),
+                algo_info: AlgoInfo {
+                    error_message: "IPOLTimeoutError: Execution timeout".into(),
+                    run_time: 1.0,
+                }
             })
         );
         std::thread::sleep(Duration::from_secs(1));
