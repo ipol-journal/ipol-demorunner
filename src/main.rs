@@ -394,7 +394,7 @@ struct ExecAndWaitRequest {
     key: RunKey,
     params: Json<RunParams>,
     ddl_run: Json<DDLRun>,
-    timeout: u64,
+    timeout: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -490,7 +490,7 @@ async fn exec_and_wait_inner(
     docker.start_container::<String>(&id, None).await?;
 
     let mut output = String::new();
-    let deadline = Instant::now() + Duration::from_secs(req.timeout);
+    let deadline = Instant::now() + Duration::from_secs(req.timeout.unwrap_or(60*5));
     timeout_at(deadline, async {
         let options = Some(LogsOptions::<String> {
             follow: true,
