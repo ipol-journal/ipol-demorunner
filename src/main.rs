@@ -360,7 +360,8 @@ struct ExecAndWaitRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct AlgoInfo {
     error_message: String,
-    run_time: f32, // TODO: compute times
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_time: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -387,7 +388,7 @@ enum ExecError {
 async fn exec_and_wait_inner(
     req: &ExecAndWaitRequest,
     config: &RunnerConfig,
-) -> Result<(), ExecError> {
+) -> Result<Duration, ExecError> {
     // TODO: write to algo_info.txt?
     dbg!(&req);
 
@@ -495,13 +496,25 @@ async fn exec_and_wait_inner(
     let options = Some(InspectContainerOptions { size: false });
     let inspect_response = docker.inspect_container(&name, options).await?;
 
-    if let Some(exit_code) = (move || inspect_response.state?.exit_code)() {
-        if exit_code != 0 {
-            return Err(ExecError::NonZeroExitCode(exit_code, output));
+    let mut duration = None;
+    if let Some(state) = inspect_response.state {
+        if let Some(exit_code) = state.exit_code {
+            if exit_code != 0 {
+                return Err(ExecError::NonZeroExitCode(exit_code, output));
+            }
+        }
+
+        if state.started_at.is_some() && state.finished_at.is_some() {
+            let now = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east(0));
+            let start = chrono::DateTime::parse_from_rfc3339(state.started_at.as_ref().unwrap())
+                .unwrap_or(now);
+            let end = chrono::DateTime::parse_from_rfc3339(state.finished_at.as_ref().unwrap())
+                .unwrap_or(now);
+            duration = (end - start).to_std().ok();
         }
     }
 
-    Ok(())
+    Ok(duration.unwrap_or_default())
 }
 
 #[post("/exec_and_wait", data = "<req>")]
@@ -511,14 +524,14 @@ async fn exec_and_wait(
 ) -> Json<ExecAndWaitResponse> {
     let rep = exec_and_wait_inner(&req, config).await;
     let response = match rep {
-        Ok(()) => ExecAndWaitResponse {
+        Ok(duration) => ExecAndWaitResponse {
             key: req.key.clone(),
             params: req.params.clone(),
             status: "OK".into(),
             error: String::new(),
             algo_info: AlgoInfo {
                 error_message: String::new(),
-                run_time: 1.0,
+                run_time: Some(duration.as_secs_f64()),
             },
         },
         Err(err) => match err {
@@ -529,7 +542,7 @@ async fn exec_and_wait(
                 error: "IPOLTimeoutError".into(),
                 algo_info: AlgoInfo {
                     error_message: err.to_string(),
-                    run_time: 1.0,
+                    run_time: None,
                 },
             },
             _ => ExecAndWaitResponse {
@@ -539,7 +552,7 @@ async fn exec_and_wait(
                 error: err.to_string(),
                 algo_info: AlgoInfo {
                     error_message: err.to_string(),
-                    run_time: 1.0,
+                    run_time: None,
                 },
             },
         },
@@ -771,19 +784,13 @@ mod test {
             ))
             .dispatch();
         assert_eq!(response.status(), Status::Ok);
-        assert_eq!(
-            response.into_json(),
-            Some(ExecAndWaitResponse {
-                status: "OK".into(),
-                error: "".into(),
-                key,
-                params,
-                algo_info: AlgoInfo {
-                    error_message: "".into(),
-                    run_time: 1.
-                }
-            })
-        );
+        let response: ExecAndWaitResponse = response.into_json().unwrap();
+        assert_eq!(response.status, "OK");
+        assert_eq!(response.key, key);
+        assert_eq!(response.params, params);
+        assert_eq!(response.error, "");
+        assert_eq!(response.algo_info.error_message, "");
+        assert!(response.algo_info.run_time.is_some());
         std::thread::sleep(Duration::from_secs(1));
     }
 
@@ -807,19 +814,16 @@ mod test {
             ))
             .dispatch();
         assert_eq!(response.status(), Status::Ok);
+        let response: ExecAndWaitResponse = response.into_json().unwrap();
+        assert_eq!(response.status, "KO");
+        assert_eq!(response.key, key);
+        assert_eq!(response.params, params);
+        assert_eq!(response.error, "Non-zero exit code (5): a\n");
         assert_eq!(
-            response.into_json(),
-            Some(ExecAndWaitResponse {
-                status: "KO".into(),
-                key,
-                params,
-                error: "Non-zero exit code (5): a\n".into(),
-                algo_info: AlgoInfo {
-                    error_message: "Non-zero exit code (5): a\n".into(),
-                    run_time: 1.0,
-                },
-            })
+            response.algo_info.error_message,
+            "Non-zero exit code (5): a\n"
         );
+        assert!(response.algo_info.run_time.is_none());
         std::thread::sleep(Duration::from_secs(1));
     }
 
@@ -829,7 +833,7 @@ mod test {
 
         let key = "test_exec_and_wait_timeout".to_string();
         let params = RunParams::new();
-        let ddl_run = "echo bla; sleep 2; echo blo";
+        let ddl_run = "sleep 2";
         let response = client
             .post("/api/demorunner/exec_and_wait")
             .header(ContentType::Form)
@@ -843,19 +847,46 @@ mod test {
             ))
             .dispatch();
         assert_eq!(response.status(), Status::Ok);
+        let response: ExecAndWaitResponse = response.into_json().unwrap();
+        assert_eq!(response.status, "KO");
+        assert_eq!(response.key, key);
+        assert_eq!(response.params, params);
+        assert_eq!(response.error, "IPOLTimeoutError");
         assert_eq!(
-            response.into_json(),
-            Some(ExecAndWaitResponse {
-                status: "KO".into(),
-                key,
-                params,
-                error: "IPOLTimeoutError".into(),
-                algo_info: AlgoInfo {
-                    error_message: "IPOLTimeoutError: Execution timeout".into(),
-                    run_time: 1.0,
-                }
-            })
+            response.algo_info.error_message,
+            "IPOLTimeoutError: Execution timeout"
         );
+        assert!(response.algo_info.run_time.is_none());
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_exec_and_wait_run_time() {
+        let client = Client::tracked(rocket()).expect("valid rocket instance");
+
+        let key = "test_exec_and_wait_run_time".to_string();
+        let params = RunParams::new();
+        let ddl_run = "sleep 2";
+        let response = client
+            .post("/api/demorunner/exec_and_wait")
+            .header(ContentType::Form)
+            .body(format!(
+                "demo_id={}&key={}&params={}&ddl_run={}&timeout={}",
+                "t001",
+                key,
+                serde_json::to_string(&params).unwrap(),
+                serde_json::to_string(&ddl_run).unwrap(),
+                10,
+            ))
+            .dispatch();
+        assert_eq!(response.status(), Status::Ok);
+        let response: ExecAndWaitResponse = response.into_json().unwrap();
+        assert_eq!(response.status, "OK");
+        assert_eq!(response.key, key);
+        assert_eq!(response.params, params);
+        assert_eq!(response.error, "");
+        assert_eq!(response.algo_info.error_message, "");
+        assert!(response.algo_info.run_time > Some(1.5));
         std::thread::sleep(Duration::from_secs(1));
     }
 
