@@ -86,6 +86,46 @@ impl std::fmt::Display for ParamValue {
 
 type RunParams = HashMap<String, ParamValue>;
 
+trait ToEnvVec {
+    fn is_valid_param_name(name: &str) -> bool {
+        const INVALID_NAMES: &[&str] = &[
+            "HOSTNAME",
+            "PATH",
+            "HOME",
+            "LANG",
+            "TERM",
+            "LD_LIBRARY_PATH",
+            "LD_PRELOAD",
+            "PYTHONPATH",
+            "PERLLIB",
+            "RUBYLIB",
+            "CLASSPATH",
+            "NODE_PATH",
+            "IPOL_DEMOID",
+            "IPOL_KEY",
+        ];
+        !INVALID_NAMES.contains(&name)
+    }
+
+    fn to_env_vec(&self, demo_id: &DemoID, key: &RunKey) -> Vec<String>;
+}
+impl ToEnvVec for RunParams {
+    fn to_env_vec(&self, demo_id: &DemoID, key: &RunKey) -> Vec<String> {
+        let mut env = vec![
+            format!("IPOL_DEMOID={}", demo_id),
+            format!("IPOL_KEY={}", key),
+        ];
+        for (name, value) in self
+            .iter()
+            .filter(|(name, _)| Self::is_valid_param_name(name))
+        {
+            // TODO: issue if name contains a =
+            env.push(format!("{}={}", name, value));
+        }
+        env
+    }
+}
+
 type DDLRun = String;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -389,7 +429,6 @@ async fn exec_and_wait_inner(
     req: &ExecAndWaitRequest,
     config: &RunnerConfig,
 ) -> Result<Duration, ExecError> {
-    // TODO: write to algo_info.txt?
     dbg!(&req);
 
     let outdir = PathBuf::from(&config.execution_root)
@@ -417,14 +456,8 @@ async fn exec_and_wait_inner(
     let options = Some(CreateContainerOptions {
         name: name.as_str(),
     });
-    let mut env = vec![
-        format!("IPOL_DEMOID={}", req.demo_id),
-        format!("IPOL_KEY={}", req.key),
-    ];
-    // TODO: make sure we don't override any important variable
-    for (name, value) in req.params.clone() {
-        env.push(format!("{}={}", name, value));
-    }
+
+    let env = req.params.clone().to_env_vec(&req.demo_id, &req.key);
     let env = env.iter().map(|s| s as &str).collect();
     let config = Config {
         image: Some(image_name.as_str()),
