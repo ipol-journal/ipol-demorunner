@@ -29,7 +29,7 @@ use futures_util::stream::StreamExt;
 use git2::Repository;
 use tar::Builder;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct RunnerConfig {
     execution_root: String,
     compilation_root: String,
@@ -37,6 +37,12 @@ struct RunnerConfig {
     docker_exec_prefix: String,
     exec_workdir_in_docker: String,
     user_uid_gid: String,
+    #[serde(default = "five_minutes")]
+    max_timeout: u64,
+}
+
+fn five_minutes() -> u64 {
+    5 * 60
 }
 
 type DemoID = String;
@@ -296,6 +302,7 @@ async fn ensure_compilation_inner(
     let mut buildlog = fs::File::create(logfile).await?;
 
     // TODO: detect if we actually need to recompile (iif a rev is specified)
+    // TODO: delete old docker images
 
     {
         let srcdir = srcdir.clone();
@@ -459,7 +466,7 @@ async fn exec_and_wait_inner(
 
     let env = req.params.clone().to_env_vec(&req.demo_id, &req.key);
     let env = env.iter().map(|s| s as &str).collect();
-    let config = Config {
+    let container_config = Config {
         image: Some(image_name.as_str()),
         user: Some(&config.user_uid_gid),
         cmd: Some(vec!["/bin/bash", "-c", req.ddl_run.as_str()]),
@@ -470,7 +477,7 @@ async fn exec_and_wait_inner(
     };
 
     let docker = Docker::connect_with_socket_defaults()?;
-    let id = docker.create_container(options, config).await?.id;
+    let id = docker.create_container(options, container_config).await?.id;
     dbg!(&id);
 
     defer! {
@@ -490,7 +497,9 @@ async fn exec_and_wait_inner(
     docker.start_container::<String>(&id, None).await?;
 
     let mut output = String::new();
-    let deadline = Instant::now() + Duration::from_secs(req.timeout.unwrap_or(60*5));
+    let max_timeout = config.max_timeout;
+    let timeout = req.timeout.map_or(max_timeout, |v| max_timeout.min(v));
+    let deadline = Instant::now() + Duration::from_secs(timeout);
     timeout_at(deadline, async {
         let options = Some(LogsOptions::<String> {
             follow: true,
