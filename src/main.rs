@@ -340,6 +340,7 @@ async fn ensure_compilation_inner(
         dockerfile: req.ddl_build.dockerfile.as_str(),
         t: &image_name,
         q: false,
+        rm: true,
         ..Default::default()
     };
 
