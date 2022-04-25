@@ -4,6 +4,7 @@ use std::time::Duration;
 
 #[macro_use]
 extern crate rocket;
+use bollard::image::{ListImagesOptions, RemoveImageOptions, TagImageOptions};
 use rocket::fairing::AdHoc;
 use rocket::form::{self, Form};
 use rocket::http::hyper::Body;
@@ -236,7 +237,7 @@ fn update_submodules(repo: &git2::Repository) -> Result<(), git2::Error> {
     Ok(())
 }
 
-fn prepare_git(path: &Path, url: &str, rev: &str) -> Result<(), CompilationError> {
+fn prepare_git(path: &Path, url: &str, rev: &str) -> Result<String, CompilationError> {
     // NOTE: libgit2 does not support shallow fetches yet
     if let Some(current_url) = url_of_git_repository(path) {
         if current_url != url {
@@ -276,17 +277,15 @@ fn prepare_git(path: &Path, url: &str, rev: &str) -> Result<(), CompilationError
         remote.fetch(&["master"], Some(&mut fo), None)?;
     }
 
-    {
-        // TODO: support "master" as rev instead of "origin/master"
-        let object = repo.revparse_single(rev)?;
-        dbg!(object.clone());
-        repo.checkout_tree(&object, None)?;
-        repo.set_head_detached(object.id())?;
-    }
+    // TODO: support "master" as rev instead of "origin/master"
+    let object = repo.revparse_single(rev)?;
+    let commit = object.id().to_string();
+    repo.checkout_tree(&object, None)?;
+    repo.set_head_detached(object.id())?;
 
     update_submodules(&repo)?;
 
-    Ok(())
+    Ok(commit)
 }
 
 async fn ensure_compilation_inner(
@@ -301,16 +300,13 @@ async fn ensure_compilation_inner(
     fs::create_dir_all(&compilation_path).await?;
     let mut buildlog = fs::File::create(logfile).await?;
 
-    // TODO: detect if we actually need to recompile (iif a rev is specified)
-    // TODO: delete old docker images
-
-    {
+    let git_rev = {
         let srcdir = srcdir.clone();
         let ddl_build = req.ddl_build.clone();
         tokio::task::spawn_blocking(move || prepare_git(&srcdir, &ddl_build.url, &ddl_build.rev))
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Interrupted, e))??;
-    }
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Interrupted, e))??
+    };
 
     if !PathBuf::from(&srcdir)
         .join(&req.ddl_build.dockerfile)
@@ -320,6 +316,37 @@ async fn ensure_compilation_inner(
             req.ddl_build.dockerfile.clone(),
         ));
     }
+
+    let docker = Docker::connect_with_socket_defaults()?;
+    let image_name = format!("{}{}", config.docker_image_prefix, req.demo_id);
+    let image_name_with_tag = format!("{}:{}", image_name, git_rev);
+
+    let filters: HashMap<&str, Vec<&str>> =
+        HashMap::from([("reference", vec![image_name.as_ref()])]);
+    let current_images = docker
+        .list_images(Some(ListImagesOptions {
+            filters,
+            ..Default::default()
+        }))
+        .await?;
+
+    if current_images
+        .iter()
+        .any(|img| img.repo_tags.iter().any(|t| t == &image_name_with_tag))
+    {
+        buildlog
+            .write(format!("(docker image already exists for commit {})", git_rev).as_bytes())
+            .await?;
+        return Ok(());
+    }
+
+    let build_image_options = BuildImageOptions {
+        dockerfile: req.ddl_build.dockerfile.clone(),
+        t: image_name_with_tag.clone(),
+        q: true,
+        rm: true,
+        ..Default::default()
+    };
 
     let vec = {
         let srcdir = srcdir.clone();
@@ -333,16 +360,6 @@ async fn ensure_compilation_inner(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Interrupted, e))??
     };
     let tar = Body::from(vec);
-
-    let docker = Docker::connect_with_socket_defaults()?;
-    let image_name = format!("{}{}", config.docker_image_prefix, req.demo_id);
-    let build_image_options = BuildImageOptions {
-        dockerfile: req.ddl_build.dockerfile.as_str(),
-        t: &image_name,
-        q: false,
-        rm: true,
-        ..Default::default()
-    };
 
     let mut image_build_stream = docker.build_image(build_image_options, None, Some(tar));
     let mut buildlogbuf = String::new();
@@ -361,10 +378,33 @@ async fn ensure_compilation_inner(
     }
 
     if errored {
-        Err(CompilationError::BuildError(buildlogbuf))
-    } else {
-        Ok(())
+        return Err(CompilationError::BuildError(buildlogbuf));
     }
+
+    for image in current_images {
+        docker
+            .remove_image(
+                &image.id,
+                Some(RemoveImageOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+                None,
+            )
+            .await?;
+    }
+
+    docker
+        .tag_image(
+            &image_name_with_tag,
+            Some(TagImageOptions {
+                repo: image_name_with_tag.as_ref(),
+                tag: "latest",
+            }),
+        )
+        .await?;
+
+    Ok(())
 }
 
 #[post("/ensure_compilation", data = "<req>")]
@@ -474,6 +514,7 @@ async fn exec_and_wait_inner(
         env: Some(env),
         working_dir: Some(exec_mountpoint),
         host_config: Some(host_config),
+        // GPU device: https://github.com/fussybeaver/bollard/issues/216#issuecomment-1067637628
         ..Default::default()
     };
 
@@ -940,18 +981,19 @@ mod test {
         let url = url_of_git_repository(path);
         assert_eq!(url, None);
 
+        let commit = "69b4dbc2ff9c3102c3b86639ed1ab608a6b5ba79";
         let url1 = String::from(GIT_URL);
-        let r = prepare_git(path, &url1, "master");
-        dbg!(&r);
+        let r = prepare_git(path, &url1, commit);
         assert!(r.is_ok());
+        assert_eq!(r.unwrap(), commit);
 
         let url = url_of_git_repository(path);
         assert_eq!(url, Some(url1));
 
         let url2 = format!("{}.git", GIT_URL);
-        let r = prepare_git(path, &url2, "master");
-        dbg!(&r);
+        let r = prepare_git(path, &url2, commit);
         assert!(r.is_ok());
+        assert_eq!(r.unwrap(), commit);
 
         let url = url_of_git_repository(path);
         assert_eq!(url, Some(url2));
