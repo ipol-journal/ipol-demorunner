@@ -5,6 +5,7 @@ use std::time::Duration;
 #[macro_use]
 extern crate rocket;
 use bollard::image::{ListImagesOptions, RemoveImageOptions, TagImageOptions};
+use bollard::models::DeviceRequest;
 use rocket::fairing::AdHoc;
 use rocket::form::{self, Form};
 use rocket::http::hyper::Body;
@@ -40,6 +41,7 @@ struct RunnerConfig {
     user_uid_gid: String,
     #[serde(default = "five_minutes")]
     max_timeout: u64,
+    gpus: Vec<String>,
 }
 
 fn five_minutes() -> u64 {
@@ -277,6 +279,7 @@ fn prepare_git(path: &Path, url: &str, rev: &str) -> Result<String, CompilationE
     }
 
     // TODO: support "master" as rev instead of "origin/master"
+    // TODO: what happens here if the commit was force pushed?
     let object = repo.revparse_single(rev)?;
     let commit = object.id().to_string();
     repo.checkout_tree(&object, None)?;
@@ -490,12 +493,25 @@ async fn exec_and_wait_inner(
     let mut stderr = fs::File::create(outdir.join("stderr.txt")).await?;
     let mut stdout = fs::File::create(outdir.join("stdout.txt")).await?;
 
+    let device_requests = if config.gpus.is_empty() {
+        None
+    } else {
+        Some(vec![DeviceRequest {
+            driver: None,
+            count: None,
+            device_ids: Some(config.gpus.clone()),
+            capabilities: Some(vec![vec!["gpu".into()]]),
+            options: None,
+        }])
+    };
+
     let host_config = bollard::models::HostConfig {
         binds: Some(vec![format!(
             "{}:{}",
             outdir.clone().into_os_string().into_string().unwrap(),
             exec_mountpoint,
         )]),
+        device_requests,
         ..Default::default()
     };
 
@@ -513,7 +529,6 @@ async fn exec_and_wait_inner(
         env: Some(env),
         working_dir: Some(exec_mountpoint),
         host_config: Some(host_config),
-        // GPU device: https://github.com/fussybeaver/bollard/issues/216#issuecomment-1067637628
         ..Default::default()
     };
 
@@ -868,6 +883,7 @@ mod test {
             .dispatch();
         assert_eq!(response.status(), Status::Ok);
         let response: ExecAndWaitResponse = response.into_json().unwrap();
+        dbg!(&response);
         assert_eq!(response.status, "OK");
         assert_eq!(response.key, key);
         assert_eq!(response.params, params);
@@ -898,6 +914,7 @@ mod test {
             .dispatch();
         assert_eq!(response.status(), Status::Ok);
         let response: ExecAndWaitResponse = response.into_json().unwrap();
+        dbg!(&response);
         assert_eq!(response.status, "KO");
         assert_eq!(response.key, key);
         assert_eq!(response.params, params);
@@ -931,6 +948,7 @@ mod test {
             .dispatch();
         assert_eq!(response.status(), Status::Ok);
         let response: ExecAndWaitResponse = response.into_json().unwrap();
+        dbg!(&response);
         assert_eq!(response.status, "KO");
         assert_eq!(response.key, key);
         assert_eq!(response.params, params);
@@ -964,6 +982,7 @@ mod test {
             .dispatch();
         assert_eq!(response.status(), Status::Ok);
         let response: ExecAndWaitResponse = response.into_json().unwrap();
+        dbg!(&response);
         assert_eq!(response.status, "OK");
         assert_eq!(response.key, key);
         assert_eq!(response.params, params);
