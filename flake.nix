@@ -2,9 +2,13 @@
   inputs = {
     flake-utils.url = "github:numtide/flake-utils";
     naersk.url = "github:nix-community/naersk";
+    flake-compat = {
+      url = "github:edolstra/flake-compat";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs, flake-utils, naersk }:
+  outputs = { self, nixpkgs, flake-utils, naersk, flake-compat }:
     flake-utils.lib.eachDefaultSystem (
       system: let
         pkgs = nixpkgs.legacyPackages."${system}";
@@ -27,7 +31,7 @@
 
           # `nix develop`
           devShell = pkgs.mkShell {
-            nativeBuildInputs = with pkgs; [ rustc cargo ];
+            nativeBuildInputs = with pkgs; [ rustc cargo openssl pkgconfig ];
           };
         }
     );
