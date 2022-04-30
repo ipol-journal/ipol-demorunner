@@ -111,7 +111,7 @@ trait ToEnvVec {
             "IPOL_DEMOID",
             "IPOL_KEY",
         ];
-        !INVALID_NAMES.contains(&name)
+        !INVALID_NAMES.contains(&name) && !name.contains('=')
     }
 
     fn to_env_vec(&self, demo_id: &DemoID, key: &RunKey) -> Vec<String>;
@@ -126,7 +126,6 @@ impl ToEnvVec for RunParams {
             .iter()
             .filter(|(name, _)| Self::is_valid_param_name(name))
         {
-            // TODO: issue if name contains a =
             env.push(format!("{}={}", name, value));
         }
         env
