@@ -260,34 +260,36 @@ fn prepare_git(path: &Path, url: &str, rev: &str) -> Result<String, CompilationE
         });
         let mut fo = git2::FetchOptions::new();
         fo.remote_callbacks(callbacks);
+        fo.download_tags(git2::AutotagOption::All);
         fo
     };
 
-    let repo = if !path.exists() {
+    let repo = if path.exists() {
+        Repository::open(path)?
+    } else {
         let fo = get_fetch_options();
         let mut builder = git2::build::RepoBuilder::new();
         builder.fetch_options(fo);
         builder.clone(url, path)?
-    } else {
-        Repository::open(path)?
     };
 
     {
         let mut fo = get_fetch_options();
         let mut remote = repo.find_remote("origin")?;
-        remote.fetch(&["master"], Some(&mut fo), None)?;
+        remote.fetch::<&str>(&[], Some(&mut fo), None)?;
     }
 
-    // TODO: support "master" as rev instead of "origin/master"
-    // TODO: what happens here if the commit was force pushed?
-    let object = repo.revparse_single(rev)?;
-    let commit = object.id().to_string();
-    repo.checkout_tree(&object, None)?;
-    repo.set_head_detached(object.id())?;
+    // TODO: support "master" as rev instead of "origin/master"?
+    let commit_id = repo.revparse_single(rev)?.peel_to_commit()?.id();
+    repo.set_head_detached(commit_id)?;
+
+    let mut checkout = git2::build::CheckoutBuilder::new();
+    checkout.force();
+    repo.checkout_head(Some(&mut checkout))?;
 
     update_submodules(&repo)?;
 
-    Ok(commit)
+    Ok(commit_id.to_string())
 }
 
 async fn ensure_compilation_inner(
