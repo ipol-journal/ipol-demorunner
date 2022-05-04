@@ -83,15 +83,17 @@ fn prepare_git(path: &Path, url: &str, rev: &str) -> Result<String, CompilationE
         std::fs::remove_dir_all(path)?;
     }
 
-    let get_fetch_options = || {
+    let home = std::env::var("HOME").unwrap();
+    let get_fetch_options = move || {
         let mut callbacks = git2::RemoteCallbacks::new();
-        callbacks.credentials(|_url, username_from_url, _allowed_types| {
-            git2::Cred::ssh_key(
-                username_from_url.unwrap(),
-                None,
-                Path::new(&format!("{}/.ssh/id_rsa", std::env::var("HOME").unwrap())),
-                None,
-            )
+        let home = home.clone();
+        callbacks.credentials(move |_url, username_from_url, _allowed_types| {
+            let path = format!("{}/.ssh/id_rsa", home);
+            let ssh_key_path = Path::new(&path);
+            match username_from_url {
+                Some(username) => git2::Cred::ssh_key(username, None, ssh_key_path, None),
+                None => Err(git2::Error::from_str("git auth: couldn't parse the username from the url (make sure that the repository is public or that the url is formatted as such: 'https://<username>@...' or 'ssh://<username>@...')"))
+            }
         });
         let mut fo = git2::FetchOptions::new();
         fo.remote_callbacks(callbacks);
@@ -454,7 +456,19 @@ buildlog: None,
         for url in urls.split(',').filter(|x| !x.is_empty()) {
             dbg!(url);
             let r = prepare_git(path, url, "master");
+            dbg!(&r);
             assert!(r.is_ok());
         }
+    }
+
+    #[test]
+    fn test_prepare_invalid_git() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let path = tmpdir.path();
+
+        let url = "https://github.com/kidanger/invalid-git";
+        let r = prepare_git(path, url, "master");
+        dbg!(&r);
+        assert!(r.is_err());
     }
 }
