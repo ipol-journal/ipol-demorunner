@@ -7,3 +7,5 @@ exec_workdir_in_docker = "/workdir"
 user_uid_gid = "1000:1000"
 # see https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/user-guide.html#gpu-enumeration
 gpus = []
+# generate with: ssh-keygen -t ed25519 -f id_ed25519
+#ssh_key_path = "id_ed25519"

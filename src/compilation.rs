@@ -73,7 +73,60 @@ fn update_submodules(repo: &git2::Repository) -> Result<(), git2::Error> {
     Ok(())
 }
 
-fn prepare_git(path: &Path, url: &str, rev: &str) -> Result<String, CompilationError> {
+struct SSHKeyPair {
+    pub_path: PathBuf,
+    priv_path: PathBuf,
+}
+
+#[derive(Default)]
+struct GitFetcher {
+    ssh_key_pair: Option<SSHKeyPair>,
+}
+
+impl GitFetcher {
+    fn builder() -> GitFetcherBuilder {
+        GitFetcherBuilder::default()
+    }
+}
+
+#[derive(Default)]
+struct GitFetcherBuilder {
+    ssh_key_path: Option<String>,
+}
+
+impl GitFetcherBuilder {
+    fn build(self) -> Result<GitFetcher, CompilationError> {
+        let ssh_key_pair = self.ssh_key_path.map(|ssh_key_path| SSHKeyPair {
+            pub_path: PathBuf::from(ssh_key_path.clone() + ".pub"),
+            priv_path: PathBuf::from(ssh_key_path),
+        });
+
+        if let Some(SSHKeyPair {
+            pub_path,
+            priv_path,
+        }) = &ssh_key_pair
+        {
+            // TODO: use anyhow to add context
+            // ex: .with_context("couldn't open the ssh key {}", pub_path)
+            std::fs::metadata(pub_path)?;
+            std::fs::metadata(priv_path)?;
+        }
+
+        Ok(GitFetcher { ssh_key_pair })
+    }
+
+    fn ssh_key_path(mut self, ssh_key_path: Option<String>) -> Self {
+        self.ssh_key_path = ssh_key_path;
+        self
+    }
+}
+
+fn prepare_git(
+    git_fetcher: &GitFetcher,
+    path: &Path,
+    url: &str,
+    rev: &str,
+) -> Result<String, CompilationError> {
     // NOTE: libgit2 does not support shallow fetches yet
     if let Some(current_url) = url_of_git_repository(path) {
         if current_url != url {
@@ -83,20 +136,22 @@ fn prepare_git(path: &Path, url: &str, rev: &str) -> Result<String, CompilationE
         std::fs::remove_dir_all(path)?;
     }
 
-    let home = std::env::var("HOME").unwrap();
-    let get_fetch_options = move || {
-        let mut callbacks = git2::RemoteCallbacks::new();
-        let home = home.clone();
-        callbacks.credentials(move |_url, username_from_url, _allowed_types| {
-            let path = format!("{}/.ssh/id_rsa", home);
-            let ssh_key_path = Path::new(&path);
-            match username_from_url {
-                Some(username) => git2::Cred::ssh_key(username, None, ssh_key_path, None),
-                None => Err(git2::Error::from_str("git auth: couldn't parse the username from the url (make sure that the repository is public or that the url is formatted as such: 'https://<username>@...' or 'ssh://<username>@...')"))
-            }
-        });
-        let mut fo = git2::FetchOptions::new();
-        fo.remote_callbacks(callbacks);
+    let get_fetch_options = || {
+        let mut fo = git2::FetchOptions::default();
+
+        if let Some(key_pair) = &git_fetcher.ssh_key_pair {
+            let mut callbacks = git2::RemoteCallbacks::new();
+            callbacks.credentials(move |_url, username_from_url, _allowed_types| {
+                let ssh_pubkey_path = Some(key_pair.pub_path.as_path());
+                let ssh_key_path = key_pair.priv_path.as_path();
+                match username_from_url {
+                    Some(username) => git2::Cred::ssh_key(username, ssh_pubkey_path, ssh_key_path, None),
+                    None => Err(git2::Error::from_str("git auth: couldn't parse the username from the url (make sure that the repository is public or that the url is formatted as such: 'https://<username>@...' or 'ssh://<username>@...')"))
+                }
+            });
+            fo.remote_callbacks(callbacks);
+        }
+
         fo.download_tags(git2::AutotagOption::All);
         fo
     };
@@ -144,9 +199,14 @@ async fn ensure_compilation_inner(
     let git_rev = {
         let srcdir = srcdir.clone();
         let ddl_build = req.ddl_build.clone();
-        tokio::task::spawn_blocking(move || prepare_git(&srcdir, &ddl_build.url, &ddl_build.rev))
-            .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Interrupted, e))??
+        let git_fetcher = GitFetcher::builder()
+            .ssh_key_path(config.ssh_key_path.clone())
+            .build()?;
+        tokio::task::spawn_blocking(move || {
+            prepare_git(&git_fetcher, &srcdir, &ddl_build.url, &ddl_build.rev)
+        })
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Interrupted, e))??
     };
 
     if !PathBuf::from(&srcdir)
@@ -431,7 +491,8 @@ buildlog: None,
 
         let commit = "69b4dbc2ff9c3102c3b86639ed1ab608a6b5ba79";
         let url1 = String::from(GIT_URL);
-        let r = prepare_git(path, &url1, commit);
+        let git_fetcher = GitFetcher::default();
+        let r = prepare_git(&git_fetcher, path, &url1, commit);
         assert!(r.is_ok());
         assert_eq!(r.unwrap(), commit);
 
@@ -439,7 +500,7 @@ buildlog: None,
         assert_eq!(url, Some(url1));
 
         let url2 = format!("{}.git", GIT_URL);
-        let r = prepare_git(path, &url2, commit);
+        let r = prepare_git(&git_fetcher, path, &url2, commit);
         assert!(r.is_ok());
         assert_eq!(r.unwrap(), commit);
 
@@ -452,12 +513,26 @@ buildlog: None,
         let tmpdir = tempfile::tempdir().unwrap();
         let path = tmpdir.path();
 
+        let git_fetcher = GitFetcher::default();
+        let git_fetcher_with_ssh = GitFetcher::builder()
+            .ssh_key_path(Some("id_ed25519".into()))
+            .build()
+            .ok();
+
         let urls = std::env::var("PRIVATE_URLS").unwrap_or_default();
         for url in urls.split(',').filter(|x| !x.is_empty()) {
             dbg!(url);
-            let r = prepare_git(path, url, "master");
+            let is_ssh = url.contains("git@");
+
+            let r = prepare_git(&git_fetcher, path, url, "master");
             dbg!(&r);
-            assert!(r.is_ok());
+            assert_eq!(r.is_ok(), !is_ssh);
+
+            if let Some(git_fetcher_with_ssh) = &git_fetcher_with_ssh {
+                let r = prepare_git(git_fetcher_with_ssh, path, url, "master");
+                dbg!(&r);
+                assert!(r.is_ok());
+            }
         }
     }
 
@@ -466,8 +541,9 @@ buildlog: None,
         let tmpdir = tempfile::tempdir().unwrap();
         let path = tmpdir.path();
 
+        let git_fetcher = GitFetcher::default();
         let url = "https://github.com/kidanger/invalid-git";
-        let r = prepare_git(path, url, "master");
+        let r = prepare_git(&git_fetcher, path, url, "master");
         dbg!(&r);
         assert!(r.is_err());
     }
