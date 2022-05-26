@@ -222,6 +222,7 @@ async fn ensure_compilation_inner(
     let docker = Docker::connect_with_socket_defaults()?.with_timeout(Duration::from_secs(60 * 10));
     let image_name = format!("{}{}", config.docker_image_prefix, req.demo_id);
     let image_name_with_tag = format!("{}:{}", image_name, git_rev);
+    let image_name_with_latest = format!("{}:latest", image_name);
 
     let filters: HashMap<&str, Vec<&str>> =
         HashMap::from([("reference", vec![image_name.as_ref()])]);
@@ -232,10 +233,10 @@ async fn ensure_compilation_inner(
         }))
         .await?;
 
-    if current_images
-        .iter()
-        .any(|img| img.repo_tags.iter().any(|t| t == &image_name_with_tag))
-    {
+    if current_images.iter().any(|img| {
+        img.repo_tags.iter().any(|t| t == &image_name_with_tag)
+            && img.repo_tags.iter().any(|t| t == &image_name_with_latest)
+    }) {
         buildlog
             .write_all(format!("(docker image already exists for commit {})", git_rev).as_bytes())
             .await?;
@@ -305,6 +306,12 @@ async fn ensure_compilation_inner(
             }
         }
     }
+
+    // NOTE: At this point, we are not sure that the built image is really the latest one
+    // since another "ensure_compilation" could have been called during this one (and may have
+    // ended before now).
+    // This means that the executions will use a "old" build.
+    // But this is not a big issue, since the next execution will make trigger yet another build.
 
     docker
         .tag_image(
