@@ -423,7 +423,7 @@ mod test {
             response.into_json(),
             Some(EnsureCompilationResponse {
                 status: "KO".into(),
-                message: "revspec 'invalid' not found; class=Reference (4); code=NotFound (-3)"
+                message: "ipol-demorunner/git: revspec 'invalid' not found; class=Reference (4); code=NotFound (-3)"
                     .into(),
                 buildlog: None,
             })
@@ -449,13 +449,13 @@ mod test {
             .dispatch();
         assert_eq!(response.status(), Status::Ok);
         assert_eq!(
-response.into_json(),
-Some(EnsureCompilationResponse {
-status: "KO".into(),
-message: "Docker responded with status code 400: dockerfile parse error line 1: unknown instruction: CFLAGS=".into(),
-buildlog: None,
-})
-);
+            response.into_json(),
+            Some(EnsureCompilationResponse {
+                status: "KO".into(),
+                message: "ipol-demorunner/docker: Docker responded with status code 400: dockerfile parse error line 1: unknown instruction: CFLAGS=".into(),
+                buildlog: None,
+            })
+            );
     }
 
     #[test]
