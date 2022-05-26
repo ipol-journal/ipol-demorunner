@@ -245,7 +245,7 @@ async fn ensure_compilation_inner(
     let build_image_options = BuildImageOptions {
         dockerfile: req.ddl_build.dockerfile.clone(),
         t: image_name_with_tag.clone(),
-        q: true,
+        q: false,
         rm: true,
         ..Default::default()
     };
