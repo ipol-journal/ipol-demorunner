@@ -247,6 +247,7 @@ async fn ensure_compilation_inner(
         t: image_name_with_tag.clone(),
         q: false,
         rm: true,
+        forcerm: true,
         ..Default::default()
     };
 
@@ -280,6 +281,7 @@ async fn ensure_compilation_inner(
     }
 
     if errored {
+        // NOTE: this leaves a dangling image, which can be removed with `docker image prune`
         return Err(CompilationError::BuildError(buildlogbuf));
     }
 
