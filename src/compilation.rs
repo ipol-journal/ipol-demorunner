@@ -286,7 +286,7 @@ async fn ensure_compilation_inner(
     }
 
     for image in current_images {
-        docker
+        match docker
             .remove_image(
                 &image.id,
                 Some(RemoveImageOptions {
@@ -295,7 +295,15 @@ async fn ensure_compilation_inner(
                 }),
                 None,
             )
-            .await?;
+            .await
+        {
+            Ok(_) => {
+                println!("removed old image {}", image.id);
+            }
+            Err(err) => {
+                println!("warning: error while removing {}: {}", image.id, err);
+            }
+        }
     }
 
     docker
