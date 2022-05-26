@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use bollard::image::{ListImagesOptions, RemoveImageOptions, TagImageOptions};
 use rocket::form::Form;
@@ -38,11 +39,11 @@ pub struct EnsureCompilationResponse {
 enum CompilationError {
     #[error("Compilation error")]
     BuildError(String),
-    #[error("{0}")]
+    #[error("ipol-demorunner/io: {0}")]
     IO(#[from] std::io::Error),
-    #[error("{0}")]
+    #[error("ipol-demorunner/docker: {0}")]
     Docker(#[from] bollard::errors::Error),
-    #[error("{0}")]
+    #[error("ipol-demorunner/git: {0}")]
     Git(#[from] git2::Error),
     #[error("Couldn't find dockerfile: {0}")]
     MissingDockerfile(String),
@@ -218,7 +219,7 @@ async fn ensure_compilation_inner(
         ));
     }
 
-    let docker = Docker::connect_with_socket_defaults()?;
+    let docker = Docker::connect_with_socket_defaults()?.with_timeout(Duration::from_secs(60 * 10));
     let image_name = format!("{}{}", config.docker_image_prefix, req.demo_id);
     let image_name_with_tag = format!("{}:{}", image_name, git_rev);
 
