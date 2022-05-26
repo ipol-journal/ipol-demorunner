@@ -237,7 +237,7 @@ async fn ensure_compilation_inner(
         .any(|img| img.repo_tags.iter().any(|t| t == &image_name_with_tag))
     {
         buildlog
-            .write(format!("(docker image already exists for commit {})", git_rev).as_bytes())
+            .write_all(format!("(docker image already exists for commit {})", git_rev).as_bytes())
             .await?;
         return Ok(());
     }
