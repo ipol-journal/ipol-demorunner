@@ -9,7 +9,7 @@ edition = "2021"
 serde = { version = "1.0", features = ["derive"] }
 git2 = "0.14"
 tar = "0.4"
-bollard = "0.12"
+bollard = "0.13"
 futures-util = "0.3"
 serde_json = "1.0"
 scopeguard = "1.1"
