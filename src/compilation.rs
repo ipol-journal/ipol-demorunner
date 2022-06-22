@@ -74,9 +74,10 @@ fn update_submodules(repo: &git2::Repository) -> Result<(), git2::Error> {
     Ok(())
 }
 
+#[derive(Debug)]
 struct SSHKeyPair {
-    pub_path: PathBuf,
-    priv_path: PathBuf,
+    public: String,
+    private: String,
 }
 
 #[derive(Default)]
@@ -97,21 +98,15 @@ struct GitFetcherBuilder {
 
 impl GitFetcherBuilder {
     fn build(self) -> Result<GitFetcher, CompilationError> {
-        let ssh_key_pair = self.ssh_key_path.map(|ssh_key_path| SSHKeyPair {
-            pub_path: PathBuf::from(ssh_key_path.clone() + ".pub"),
-            priv_path: PathBuf::from(ssh_key_path),
-        });
-
-        if let Some(SSHKeyPair {
-            pub_path,
-            priv_path,
-        }) = &ssh_key_pair
-        {
+        let ssh_key_pair = if let Some(ssh_key_path) = self.ssh_key_path {
             // TODO: use anyhow to add context
             // ex: .with_context("couldn't open the ssh key {}", pub_path)
-            std::fs::metadata(pub_path)?;
-            std::fs::metadata(priv_path)?;
-        }
+            let public = std::fs::read_to_string(&format!("{ssh_key_path}.pub"))?;
+            let private = std::fs::read_to_string(&ssh_key_path)?;
+            Some(SSHKeyPair { public, private })
+        } else {
+            None
+        };
 
         Ok(GitFetcher { ssh_key_pair })
     }
@@ -143,10 +138,10 @@ fn prepare_git(
         if let Some(key_pair) = &git_fetcher.ssh_key_pair {
             let mut callbacks = git2::RemoteCallbacks::new();
             callbacks.credentials(move |_url, username_from_url, _allowed_types| {
-                let ssh_pubkey_path = Some(key_pair.pub_path.as_path());
-                let ssh_key_path = key_pair.priv_path.as_path();
+                let ssh_pubkey = Some(key_pair.public.as_str());
+                let ssh_key = &key_pair.private;
                 match username_from_url {
-                    Some(username) => git2::Cred::ssh_key(username, ssh_pubkey_path, ssh_key_path, None),
+                    Some(username) => git2::Cred::ssh_key_from_memory(username, ssh_pubkey, ssh_key, None),
                     None => Err(git2::Error::from_str("git auth: couldn't parse the username from the url (make sure that the repository is public or that the url is formatted as such: 'https://<username>@...' or 'ssh://<username>@...')"))
                 }
             });
