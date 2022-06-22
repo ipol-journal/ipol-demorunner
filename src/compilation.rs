@@ -20,11 +20,28 @@ use tar::Builder;
 use crate::config;
 use crate::model::*;
 
+#[derive(Debug, Clone, FromForm)]
+struct SSHKeyPair {
+    public: String,
+    private: String,
+}
+
+impl SSHKeyPair {
+    fn from_path(path: &str) -> Result<SSHKeyPair, std::io::Error> {
+        // TODO: use anyhow to add context
+        // ex: .with_context("couldn't open the ssh key {}", pub_path)
+        let public = std::fs::read_to_string(&format!("{path}.pub"))?;
+        let private = std::fs::read_to_string(&path)?;
+        Ok(SSHKeyPair { public, private })
+    }
+}
+
 #[derive(Debug, FromForm)]
 pub struct EnsureCompilationRequest {
     #[field(validate=validate_demoid())]
     demo_id: DemoID,
     ddl_build: Json<DDLBuild>,
+    ssh_key: Option<SSHKeyPair>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -74,12 +91,6 @@ fn update_submodules(repo: &git2::Repository) -> Result<(), git2::Error> {
     Ok(())
 }
 
-#[derive(Debug)]
-struct SSHKeyPair {
-    public: String,
-    private: String,
-}
-
 #[derive(Default)]
 struct GitFetcher {
     ssh_key_pair: Option<SSHKeyPair>,
@@ -93,26 +104,18 @@ impl GitFetcher {
 
 #[derive(Default)]
 struct GitFetcherBuilder {
-    ssh_key_path: Option<String>,
+    ssh_key: Option<SSHKeyPair>,
 }
 
 impl GitFetcherBuilder {
     fn build(self) -> Result<GitFetcher, CompilationError> {
-        let ssh_key_pair = if let Some(ssh_key_path) = self.ssh_key_path {
-            // TODO: use anyhow to add context
-            // ex: .with_context("couldn't open the ssh key {}", pub_path)
-            let public = std::fs::read_to_string(&format!("{ssh_key_path}.pub"))?;
-            let private = std::fs::read_to_string(&ssh_key_path)?;
-            Some(SSHKeyPair { public, private })
-        } else {
-            None
-        };
-
-        Ok(GitFetcher { ssh_key_pair })
+        Ok(GitFetcher {
+            ssh_key_pair: self.ssh_key,
+        })
     }
 
-    fn ssh_key_path(mut self, ssh_key_path: Option<String>) -> Self {
-        self.ssh_key_path = ssh_key_path;
+    fn ssh_key(mut self, ssh_key: Option<SSHKeyPair>) -> Self {
+        self.ssh_key = ssh_key;
         self
     }
 }
@@ -195,8 +198,13 @@ async fn ensure_compilation_inner(
     let git_rev = {
         let srcdir = srcdir.clone();
         let ddl_build = req.ddl_build.clone();
+        let ssh_key_from_file = if let Some(path) = &config.ssh_key_path {
+            Some(SSHKeyPair::from_path(path)?)
+        } else {
+            None
+        };
         let git_fetcher = GitFetcher::builder()
-            .ssh_key_path(config.ssh_key_path.clone())
+            .ssh_key(req.ssh_key.clone().or(ssh_key_from_file))
             .build()?;
         tokio::task::spawn_blocking(move || {
             prepare_git(&git_fetcher, &srcdir, &ddl_build.url, &ddl_build.rev)
@@ -527,10 +535,8 @@ mod test {
         let path = tmpdir.path();
 
         let git_fetcher = GitFetcher::default();
-        let git_fetcher_with_ssh = GitFetcher::builder()
-            .ssh_key_path(Some("id_ed25519".into()))
-            .build()
-            .ok();
+        let ssh_key = SSHKeyPair::from_path("id_ed25519").ok();
+        let git_fetcher_with_ssh = GitFetcher::builder().ssh_key(ssh_key).build().ok();
 
         let urls = std::env::var("PRIVATE_URLS").unwrap_or_default();
         for url in urls.split(',').filter(|x| !x.is_empty()) {
