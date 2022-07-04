@@ -19,18 +19,7 @@ fn main_rocket() -> _ {
     // TODO: restrict access to the service somehow
     rocket::build()
         .mount(
-            "/api/demorunner/",
-            routes![
-                index,
-                ping::ping,
-                shutdown::shutdown,
-                workload::get_workload,
-                compilation::ensure_compilation,
-                execution::exec_and_wait
-            ],
-        )
-        .mount(
-            "/api/demorunner-docker/",
+            "/",
             routes![
                 index,
                 ping::ping,
