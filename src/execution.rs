@@ -266,7 +266,7 @@ mod test {
         ]);
         let ddl_run = "test $z = $IPOL_DEMOID";
         let response = client
-            .post("/api/demorunner/exec_and_wait")
+            .post("/exec_and_wait")
             .header(ContentType::Form)
             .body(format!(
                 "demo_id={}&key={}&params={}&ddl_run={}&timeout={}",
@@ -297,7 +297,7 @@ mod test {
         let params = RunParams::new();
         let ddl_run = "echo a; exit 5; echo b;";
         let response = client
-            .post("/api/demorunner/exec_and_wait")
+            .post("/exec_and_wait")
             .header(ContentType::Form)
             .body(format!(
                 "demo_id={}&key={}&params={}&ddl_run={}&timeout={}",
@@ -331,7 +331,7 @@ mod test {
         let params = RunParams::new();
         let ddl_run = "sleep 2";
         let response = client
-            .post("/api/demorunner/exec_and_wait")
+            .post("/exec_and_wait")
             .header(ContentType::Form)
             .body(format!(
                 "demo_id={}&key={}&params={}&ddl_run={}&timeout={}",
@@ -365,7 +365,7 @@ mod test {
         let params = RunParams::new();
         let ddl_run = "sleep 2";
         let response = client
-            .post("/api/demorunner/exec_and_wait")
+            .post("/exec_and_wait")
             .header(ContentType::Form)
             .body(format!(
                 "demo_id={}&key={}&params={}&ddl_run={}&timeout={}",

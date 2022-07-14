@@ -374,7 +374,7 @@ mod test {
             dockerfile: ".ipol/Dockerfile".into(),
         };
         let response = client
-            .post("/api/demorunner/ensure_compilation")
+            .post("/ensure_compilation")
             .header(rocket::http::ContentType::Form)
             .body(format!(
                 "demo_id={}&ddl_build={}",
@@ -402,7 +402,7 @@ mod test {
             dockerfile: "missing".into(),
         };
         let response = client
-            .post("/api/demorunner/ensure_compilation")
+            .post("/ensure_compilation")
             .header(rocket::http::ContentType::Form)
             .body(format!(
                 "demo_id={}&ddl_build={}",
@@ -430,7 +430,7 @@ mod test {
             dockerfile: ".ipol/Dockerfile".into(),
         };
         let response = client
-            .post("/api/demorunner/ensure_compilation")
+            .post("/ensure_compilation")
             .header(rocket::http::ContentType::Form)
             .body(format!(
                 "demo_id={}&ddl_build={}",
@@ -459,7 +459,7 @@ mod test {
             dockerfile: "Makefile".into(),
         };
         let response = client
-            .post("/api/demorunner/ensure_compilation")
+            .post("/ensure_compilation")
             .header(rocket::http::ContentType::Form)
             .body(format!(
                 "demo_id={}&ddl_build={}",
@@ -487,7 +487,7 @@ mod test {
             dockerfile: ".ipol/Dockerfile-error".into(),
         };
         let response = client
-            .post("/api/demorunner/ensure_compilation")
+            .post("/ensure_compilation")
             .header(rocket::http::ContentType::Form)
             .body(format!(
                 "demo_id={}&ddl_build={}",

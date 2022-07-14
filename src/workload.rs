@@ -25,7 +25,7 @@ mod test {
     #[test]
     fn test_get_workfload() {
         let client = Client::tracked(main_rocket()).expect("valid rocket instance");
-        let response = client.get("/api/demorunner/get_workload").dispatch();
+        let response = client.get("/get_workload").dispatch();
         assert_eq!(response.status(), Status::Ok);
         assert_eq!(
             response.into_json(),
