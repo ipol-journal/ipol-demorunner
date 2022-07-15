@@ -15,6 +15,7 @@ pub struct Config {
     pub ssh_key_path: Option<String>,
     #[serde(default)]
     pub env_vars: RunParams,
+    pub registry_url: Option<String>,
 }
 
 const fn five_minutes() -> u64 {

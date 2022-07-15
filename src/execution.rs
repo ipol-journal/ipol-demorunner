@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use bollard::models::DeviceRequest;
@@ -64,6 +65,14 @@ enum ExecError {
     Timeout(#[from] Elapsed),
     #[error("zip: {0}")]
     Zip(#[from] zip::result::ZipError),
+    #[error("ipol-demorunner/exec/git: {0}")]
+    Git(#[from] git2::Error),
+}
+
+fn get_git_revision(src_path: PathBuf) -> Result<String, git2::Error> {
+    let repo = git2::Repository::open(src_path)?;
+    let commit_id = repo.head()?.peel_to_commit()?.id();
+    Ok(commit_id.to_string())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -249,6 +258,7 @@ async fn exec_and_wait_inner(
     outdir: &std::path::Path,
 ) -> Result<Duration, ExecError> {
     tracing::debug!("{req:?}");
+    let docker = Docker::connect_with_socket_defaults()?;
 
     // canonicalize for docker volumes
     let outdir = fs::canonicalize(outdir).await?;
@@ -257,7 +267,34 @@ async fn exec_and_wait_inner(
         save_input(input, &outdir).await?;
     }
 
-    let image_name = format!("{}{}:latest", config.docker_image_prefix, req.demo_id);
+    let src_path = PathBuf::from(&config.compilation_root)
+        .join(&req.demo_id)
+        .join("src");
+    let git_rev = get_git_revision(src_path)?;
+    let registry = config
+        .registry_url
+        .as_ref()
+        .map_or(String::new(), |url| (url.clone() + "/"));
+    let image_name = format!(
+        "{}{}{}:{}",
+        registry, config.docker_image_prefix, req.demo_id, git_rev
+    );
+
+    if config.registry_url.is_some() {
+        let mut stream = docker.create_image(
+            Some(bollard::image::CreateImageOptions {
+                from_image: image_name.clone(),
+                ..Default::default()
+            }),
+            None,
+            None,
+        );
+        while let Some(msg) = stream.next().await {
+            if let Err(err) = msg {
+                warn!("exec/pull: {}", err);
+            }
+        }
+    }
 
     let name = format!("{}{}-{}", config.docker_exec_prefix, req.demo_id, req.key);
     let options = Some(CreateContainerOptions {
@@ -285,7 +322,6 @@ async fn exec_and_wait_inner(
         ..Default::default()
     };
 
-    let docker = Docker::connect_with_socket_defaults()?;
     tracing::debug!(name = name, image_name = image_name);
     let id = docker.create_container(options, container_config).await?.id;
     tracing::debug!(id = id);
