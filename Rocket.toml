@@ -10,3 +10,4 @@ env_vars = {}
 gpus = []
 # generate with: ssh-keygen -t ed25519 -f id_ed25519
 #ssh_key_path = "id_ed25519"
+#registry_url = "localhost:7799"

@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use bollard::image::{ListImagesOptions, RemoveImageOptions, TagImageOptions};
+use bollard::auth::DockerCredentials;
+use bollard::image::{ListImagesOptions, RemoveImageOptions};
 use rocket::form::Form;
 use rocket::http::hyper::Body;
 use rocket::serde::json::Json;
@@ -223,9 +224,42 @@ async fn ensure_compilation_inner(
     }
 
     let docker = Docker::connect_with_socket_defaults()?.with_timeout(Duration::from_secs(60 * 10));
-    let image_name = format!("{}{}", config.docker_image_prefix, req.demo_id);
+
+    let registry = config
+        .registry_url
+        .as_ref()
+        .map_or(String::new(), |url| (url.clone() + "/"));
+
+    let image_name = format!("{}{}{}", registry, config.docker_image_prefix, req.demo_id);
     let image_name_with_tag = format!("{}:{}", image_name, git_rev);
-    let image_name_with_latest = format!("{}:latest", image_name);
+
+    let mut pulled = true;
+    let mut stream = docker.create_image(
+        Some(bollard::image::CreateImageOptions {
+            from_image: image_name_with_tag.clone(),
+            ..Default::default()
+        }),
+        None,
+        None,
+    );
+    while let Some(msg) = stream.next().await {
+        if msg.is_err() {
+            pulled = false;
+        }
+    }
+
+    if pulled {
+        buildlog
+            .write_all(
+                format!(
+                    "(docker image '{}' already exists (local or pulled))",
+                    image_name_with_tag
+                )
+                .as_bytes(),
+            )
+            .await?;
+        return Ok(());
+    }
 
     let filters: HashMap<&str, Vec<&str>> =
         HashMap::from([("reference", vec![image_name.as_ref()])]);
@@ -236,12 +270,18 @@ async fn ensure_compilation_inner(
         }))
         .await?;
 
-    if current_images.iter().any(|img| {
-        img.repo_tags.iter().any(|t| t == &image_name_with_tag)
-            && img.repo_tags.iter().any(|t| t == &image_name_with_latest)
-    }) {
+    if current_images
+        .iter()
+        .any(|img| img.repo_tags.iter().any(|t| t == &image_name_with_tag))
+    {
         buildlog
-            .write_all(format!("(docker image already exists for commit {})", git_rev).as_bytes())
+            .write_all(
+                format!(
+                    "(docker image '{}' already exists (local))",
+                    image_name_with_tag
+                )
+                .as_bytes(),
+            )
             .await?;
         return Ok(());
     }
@@ -310,21 +350,31 @@ async fn ensure_compilation_inner(
         }
     }
 
-    // NOTE: At this point, we are not sure that the built image is really the latest one
-    // since another "ensure_compilation" could have been called during this one (and may have
-    // ended before now).
-    // This means that the executions will use a "old" build.
-    // But this is not a big issue, since the next execution will make trigger yet another build.
+    if config.registry_url.is_some() {
+        let creds = DockerCredentials {
+            // we don't provide any authentification for now,
+            // so we rely on a manual "docker login <registry_url>"
+            serveraddress: config.registry_url.clone(),
+            ..Default::default()
+        };
+        let push_options = Some(bollard::image::PushImageOptions { tag: git_rev });
+        let mut stream = docker.push_image(&image_name, push_options, Some(creds));
+        let mut pushlogbuf = String::new();
+        while let Some(msg) = stream.next().await {
+            let info = msg?;
+            if let Some(stream) = info.progress {
+                pushlogbuf.push_str(&stream);
+            }
+            if let Some(err) = info.error {
+                pushlogbuf.push_str(&err);
+                errored = true;
+            }
+        }
 
-    docker
-        .tag_image(
-            &image_name_with_tag,
-            Some(TagImageOptions {
-                repo: image_name_with_tag.as_ref(),
-                tag: "latest",
-            }),
-        )
-        .await?;
+        if errored {
+            warn!("compile/push: {}", pushlogbuf);
+        }
+    }
 
     Ok(())
 }

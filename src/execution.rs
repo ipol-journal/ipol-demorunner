@@ -59,6 +59,14 @@ enum ExecError {
     Docker(#[from] bollard::errors::Error),
     #[error("IPOLTimeoutError: Execution timeout")]
     Timeout(#[from] Elapsed),
+    #[error("ipol-demorunner/exec/git: {0}")]
+    Git(#[from] git2::Error),
+}
+
+fn get_git_revision(src_path: PathBuf) -> Result<String, git2::Error> {
+    let repo = git2::Repository::open(src_path)?;
+    let commit_id = repo.head()?.peel_to_commit()?.id();
+    Ok(commit_id.to_string())
 }
 
 async fn exec_and_wait_inner(
@@ -67,14 +75,42 @@ async fn exec_and_wait_inner(
 ) -> Result<Duration, ExecError> {
     dbg!(&req);
 
+    let docker = Docker::connect_with_socket_defaults()?;
     let outdir = PathBuf::from(&config.execution_root)
         .join(&req.demo_id)
         .join(&req.key);
     fs::create_dir_all(&outdir).await?;
     let outdir = fs::canonicalize(outdir).await?;
 
-    let image_name = format!("{}{}:latest", config.docker_image_prefix, req.demo_id);
+    let src_path = PathBuf::from(&config.compilation_root)
+        .join(&req.demo_id)
+        .join("src");
+    let git_rev = get_git_revision(src_path)?;
+    let registry = config
+        .registry_url
+        .as_ref()
+        .map_or(String::new(), |url| (url.clone() + "/"));
+    let image_name = format!(
+        "{}{}{}:{}",
+        registry, config.docker_image_prefix, req.demo_id, git_rev
+    );
     let exec_mountpoint = &config.exec_workdir_in_docker;
+
+    if config.registry_url.is_some() {
+        let mut stream = docker.create_image(
+            Some(bollard::image::CreateImageOptions {
+                from_image: image_name.clone(),
+                ..Default::default()
+            }),
+            None,
+            None,
+        );
+        while let Some(msg) = stream.next().await {
+            if let Err(err) = msg {
+                warn!("exec/pull: {}", err);
+            }
+        }
+    }
 
     let mut stderr = fs::File::create(outdir.join("stderr.txt")).await?;
     let mut stdout = fs::File::create(outdir.join("stdout.txt")).await?;
@@ -124,9 +160,7 @@ async fn exec_and_wait_inner(
         ..Default::default()
     };
 
-    let docker = Docker::connect_with_socket_defaults()?;
     let id = docker.create_container(options, container_config).await?.id;
-    dbg!(&id);
 
     scopeguard::defer! {
         let docker = docker.clone();
@@ -175,7 +209,7 @@ async fn exec_and_wait_inner(
                     println!("console: {message:#?}");
                 }
                 Err(e) => {
-                    dbg!(&e);
+                    warn!("{}", &e);
                 }
             };
         }
