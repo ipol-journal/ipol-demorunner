@@ -5,6 +5,7 @@ docker_image_prefix = "ipol-demo-"
 docker_exec_prefix = "ipol-exec-"
 exec_workdir_in_docker = "/workdir"
 user_uid_gid = "1000:1000"
+env_vars = {}
 # see https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/user-guide.html#gpu-enumeration
 gpus = []
 # generate with: ssh-keygen -t ed25519 -f id_ed25519

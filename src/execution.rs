@@ -106,7 +106,13 @@ async fn exec_and_wait_inner(
         name: name.as_str(),
     });
 
-    let env = req.params.clone().to_env_vec(&req.demo_id, &req.key);
+    let env = req
+        .params
+        .clone()
+        .into_iter()
+        .chain(config.env_vars.clone().into_iter())
+        .collect::<RunParams>()
+        .to_env_vec(&req.demo_id, &req.key);
     let env = env.iter().map(|s| s as &str).collect();
     let container_config = Config {
         image: Some(image_name.as_str()),

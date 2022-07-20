@@ -1,5 +1,7 @@
 use rocket::serde::Deserialize;
 
+use crate::model::RunParams;
+
 #[derive(Deserialize, Debug)]
 pub struct Config {
     pub execution_root: String,
@@ -12,6 +14,8 @@ pub struct Config {
     pub max_timeout: u64,
     pub gpus: Vec<String>,
     pub ssh_key_path: Option<String>,
+    #[serde(default)]
+    pub env_vars: RunParams,
 }
 
 fn five_minutes() -> u64 {
