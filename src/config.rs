@@ -18,7 +18,7 @@ pub struct Config {
     pub env_vars: RunParams,
 }
 
-fn five_minutes() -> u64 {
+const fn five_minutes() -> u64 {
     5 * 60
 }
 

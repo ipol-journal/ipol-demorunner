@@ -10,7 +10,7 @@ pub mod shutdown;
 pub mod workload;
 
 #[get("/")]
-fn index() -> &'static str {
+const fn index() -> &'static str {
     "This is the IPOL DemoRunner module (docker)"
 }
 
