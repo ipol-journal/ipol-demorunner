@@ -187,7 +187,7 @@ fn prepare_git(
 async fn ensure_compilation_inner(
     req: Form<EnsureCompilationRequest>,
     config: &State<config::Config>,
-) -> Result<(), CompilationError> {
+) -> Result<Option<String>, CompilationError> {
     dbg!(&req);
 
     let compilation_path = PathBuf::from(&config.compilation_root).join(&req.demo_id);
@@ -258,7 +258,7 @@ async fn ensure_compilation_inner(
                 .as_bytes(),
             )
             .await?;
-        return Ok(());
+        return Ok(None);
     }
 
     let filters: HashMap<&str, Vec<&str>> =
@@ -283,7 +283,7 @@ async fn ensure_compilation_inner(
                 .as_bytes(),
             )
             .await?;
-        return Ok(());
+        return Ok(None);
     }
 
     let build_image_options = BuildImageOptions {
@@ -376,7 +376,7 @@ async fn ensure_compilation_inner(
         }
     }
 
-    Ok(())
+    Ok(Some(buildlogbuf))
 }
 
 #[post("/ensure_compilation", data = "<req>")]
@@ -385,10 +385,10 @@ pub async fn ensure_compilation(
     config: &State<config::Config>,
 ) -> Json<EnsureCompilationResponse> {
     let response = match ensure_compilation_inner(req, config).await {
-        Ok(()) => EnsureCompilationResponse {
+        Ok(logs) => EnsureCompilationResponse {
             status: "OK".into(),
             message: String::new(),
-            buildlog: None,
+            buildlog: logs,
         },
         Err(err) => match err {
             CompilationError::BuildError(ref buildlog) => EnsureCompilationResponse {
@@ -433,14 +433,10 @@ mod test {
             ))
             .dispatch();
         assert_eq!(response.status(), Status::Ok);
-        assert_eq!(
-            response.into_json(),
-            Some(EnsureCompilationResponse {
-                status: "OK".into(),
-                message: "".into(),
-                buildlog: None,
-            })
-        );
+
+        let r: EnsureCompilationResponse = response.into_json().unwrap();
+        assert_eq!(r.status, "OK");
+        assert_eq!(r.message, "");
     }
 
     #[test]
