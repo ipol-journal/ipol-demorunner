@@ -4,3 +4,6 @@ pipeline:
     commands:
     - nix --extra-experimental-features nix-command --extra-experimental-features flakes flake check
     - nix --extra-experimental-features nix-command --extra-experimental-features flakes build .
+    volumes:
+    # https://releases.nixos.org/nix-dev/2017-June/023903.html
+    - nix:/nix/
