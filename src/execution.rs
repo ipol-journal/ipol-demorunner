@@ -174,6 +174,7 @@ async fn exec_and_wait_inner(
 
     let env = req
         .params
+        .0
         .clone()
         .into_iter()
         .chain(config.env_vars.clone().into_iter())
