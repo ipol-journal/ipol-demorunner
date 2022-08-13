@@ -1,6 +1,5 @@
 [default]
 compilation_root = "./compilation/"
-execution_root = "./execution/"
 docker_image_prefix = "ipol-demo-"
 docker_exec_prefix = "ipol-exec-"
 exec_workdir_in_docker = "/workdir"

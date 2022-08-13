@@ -4,7 +4,6 @@ use crate::model::RunParams;
 
 #[derive(Deserialize, Debug)]
 pub struct Config {
-    pub execution_root: String,
     pub compilation_root: String,
     pub docker_image_prefix: String,
     pub docker_exec_prefix: String,

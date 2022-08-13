@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 git2 = "0.14"
+zip = "0.6"
 tar = "0.4"
 bollard = "0.13"
 futures-util = "0.3"
@@ -18,6 +19,8 @@ regex = "1"
 lazy_static = "1.4"
 tempfile = "3.3"
 chrono = "0.4"
+walkdir = "2.3"
+safe-path = "0.1"
 
 [dependencies.rocket]
 version = "0.5.0-rc.1"

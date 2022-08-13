@@ -1,8 +1,8 @@
-use std::path::PathBuf;
 use std::time::Duration;
 
 use bollard::models::DeviceRequest;
 use rocket::form::Form;
+use rocket::http::Header;
 use rocket::serde::json::Json;
 use rocket::serde::{Deserialize, Serialize};
 use rocket::tokio::fs;
@@ -23,17 +23,18 @@ use crate::config;
 use crate::model::*;
 
 #[derive(Debug, FromForm)]
-pub struct ExecAndWaitRequest {
+pub struct ExecAndWaitRequest<'a> {
     #[field(validate=validate_demoid())]
     demo_id: DemoID,
     #[field(validate=validate_runkey())]
     key: RunKey,
     params: Json<RunParams>,
-    ddl_run: Json<DDLRun>,
+    ddl_run: DDLRun,
     timeout: Option<u64>,
+    inputs: Vec<rocket::fs::TempFile<'a>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ExecAndWaitResponse {
     key: RunKey,
     params: RunParams,
@@ -41,6 +42,27 @@ pub struct ExecAndWaitResponse {
     error: String,
     algo_info: AlgoInfo,
 }
+#[derive(Debug, Serialize)]
+pub struct ExecAndWaitError {
+    error_message: String,
+}
+
+pub struct Runtime(f64);
+
+#[derive(Responder)]
+#[response(status = 200, content_type = "binary")]
+pub struct ExecAndWaitSuccess {
+    zip: Vec<u8>,
+    runtime: Runtime,
+}
+
+impl<'h> Into<Header<'h>> for Runtime {
+    fn into(self) -> rocket::http::Header<'h> {
+        Header::new("runtime-seconds", self.0.to_string())
+    }
+}
+
+pub type ExecAndWaitResult = Result<ExecAndWaitSuccess, Json<ExecAndWaitError>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct AlgoInfo {
@@ -59,19 +81,63 @@ enum ExecError {
     Docker(#[from] bollard::errors::Error),
     #[error("IPOLTimeoutError: Execution timeout")]
     Timeout(#[from] Elapsed),
+    #[error("zip: {0}")]
+    Zip(#[from] zip::result::ZipError),
+    #[error("io path: {0}")]
+    IOPath(#[from] std::path::StripPrefixError),
+}
+
+fn zip_dir_into_bytes(dir: &std::path::Path) -> Result<Vec<u8>, ExecError> {
+    let writer = std::io::Cursor::new(Vec::new());
+    let mut zip = zip::ZipWriter::new(writer);
+    let options = zip::write::FileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .unix_permissions(0o644);
+
+    for file in walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        let filename = file.path();
+
+        let name_in_zip = filename.strip_prefix(dir)?;
+        let name_in_zip = name_in_zip.to_str().unwrap();
+        if name_in_zip.is_empty() {
+            continue;
+        }
+
+        if file.file_type().is_file() {
+            if let Ok(mut file) = std::fs::File::open(filename) {
+                zip.start_file(name_in_zip.to_string(), options)?;
+                std::io::copy(&mut file, &mut zip)?;
+            }
+        } else if file.file_type().is_dir() {
+            zip.add_directory(name_in_zip.to_string(), options).ok();
+        }
+    }
+
+    Ok(zip.finish()?.into_inner())
 }
 
 async fn exec_and_wait_inner(
-    req: &ExecAndWaitRequest,
+    req: &mut ExecAndWaitRequest<'_>,
     config: &config::Config,
-) -> Result<Duration, ExecError> {
+) -> Result<ExecAndWaitSuccess, ExecError> {
     dbg!(&req);
 
-    let outdir = PathBuf::from(&config.execution_root)
-        .join(&req.demo_id)
-        .join(&req.key);
-    fs::create_dir_all(&outdir).await?;
+    let tmpdir = tempfile::TempDir::new()?;
+    let outdir = tmpdir.path();
     let outdir = fs::canonicalize(outdir).await?;
+
+    for input in &mut req.inputs {
+        if let Some(filename) = input.raw_name() {
+            let filename = filename.dangerous_unsafe_unsanitized_raw().as_str();
+            let filename = std::path::Path::new(filename);
+
+            let dst = safe_path::scoped_join(&outdir, filename)?;
+            input.persist_to(dst).await?;
+        }
+    }
 
     let image_name = format!("{}{}:latest", config.docker_image_prefix, req.demo_id);
     let exec_mountpoint = &config.exec_workdir_in_docker;
@@ -94,7 +160,7 @@ async fn exec_and_wait_inner(
     let host_config = bollard::models::HostConfig {
         binds: Some(vec![format!(
             "{}:{}",
-            outdir.clone().into_os_string().into_string().unwrap(),
+            outdir.clone().to_str().unwrap(),
             exec_mountpoint,
         )]),
         device_requests,
@@ -204,50 +270,31 @@ async fn exec_and_wait_inner(
         }
     }
 
-    Ok(duration.unwrap_or_default())
+    let zip = zip_dir_into_bytes(&outdir)?;
+
+    let duration = duration.unwrap_or_default();
+    let runtime = Runtime(duration.as_secs_f64());
+    Ok(ExecAndWaitSuccess { zip, runtime })
 }
 
 #[post("/exec_and_wait", data = "<req>")]
 pub async fn exec_and_wait(
-    req: Form<ExecAndWaitRequest>,
+    mut req: Form<ExecAndWaitRequest<'_>>,
     config: &State<config::Config>,
-) -> Json<ExecAndWaitResponse> {
-    let rep = exec_and_wait_inner(&req, config).await;
+) -> ExecAndWaitResult {
+    let rep = exec_and_wait_inner(&mut req, config).await;
     let response = match rep {
-        Ok(duration) => ExecAndWaitResponse {
-            key: req.key.clone(),
-            params: req.params.clone(),
-            status: "OK".into(),
-            error: String::new(),
-            algo_info: AlgoInfo {
-                error_message: String::new(),
-                run_time: Some(duration.as_secs_f64()),
-            },
-        },
+        Ok(success) => Ok(success),
         Err(err) => match err {
-            ExecError::Timeout(_) => ExecAndWaitResponse {
-                key: req.key.clone(),
-                params: req.params.clone(),
-                status: "KO".into(),
-                error: "IPOLTimeoutError".into(),
-                algo_info: AlgoInfo {
-                    error_message: err.to_string(),
-                    run_time: None,
-                },
-            },
-            _ => ExecAndWaitResponse {
-                key: req.key.clone(),
-                params: req.params.clone(),
-                status: "KO".into(),
-                error: err.to_string(),
-                algo_info: AlgoInfo {
-                    error_message: err.to_string(),
-                    run_time: None,
-                },
-            },
+            ExecError::Timeout(_) => Err(Json(ExecAndWaitError {
+                error_message: "IPOLTimeoutError".into(),
+            })),
+            _ => Err(Json(ExecAndWaitError {
+                error_message: err.to_string(),
+            })),
         },
     };
-    Json(response)
+    response
 }
 
 #[cfg(test)]
@@ -279,7 +326,7 @@ mod test {
                 "t001",
                 key,
                 serde_json::to_string(&params).unwrap(),
-                serde_json::to_string(&ddl_run).unwrap(),
+                ddl_run,
                 10,
             ))
             .dispatch();
