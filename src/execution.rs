@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use bollard::models::DeviceRequest;
 use rocket::form::Form;
-use rocket::http::Header;
 use rocket::serde::json::Json;
 use rocket::serde::{Deserialize, Serialize};
 use rocket::tokio::fs;
@@ -34,41 +33,28 @@ pub struct ExecAndWaitRequest<'a> {
     inputs: Vec<rocket::fs::TempFile<'a>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ExecAndWaitResponse {
-    key: RunKey,
-    params: RunParams,
-    status: String,
-    error: String,
-    algo_info: AlgoInfo,
-}
-#[derive(Debug, Serialize)]
-pub struct ExecAndWaitError {
-    error_message: String,
-}
-
-pub struct Runtime(f64);
-
 #[derive(Responder)]
-#[response(status = 200, content_type = "binary")]
-pub struct ExecAndWaitSuccess {
+#[response(status = 200, content_type = "application/zip")]
+pub struct ExecAndWaitResponse {
     zip: Vec<u8>,
-    runtime: Runtime,
 }
-
-impl<'h> Into<Header<'h>> for Runtime {
-    fn into(self) -> rocket::http::Header<'h> {
-        Header::new("runtime-seconds", self.0.to_string())
-    }
-}
-
-pub type ExecAndWaitResult = Result<ExecAndWaitSuccess, Json<ExecAndWaitError>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct AlgoInfo {
-    error_message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     run_time: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExecInfo {
+    key: RunKey,
+    params: RunParams,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    algo_info: AlgoInfo,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -122,11 +108,10 @@ fn zip_dir_into_bytes(dir: &std::path::Path) -> Result<Vec<u8>, ExecError> {
 async fn exec_and_wait_inner(
     req: &mut ExecAndWaitRequest<'_>,
     config: &config::Config,
-) -> Result<ExecAndWaitSuccess, ExecError> {
+    outdir: &std::path::Path,
+) -> Result<Duration, ExecError> {
     dbg!(&req);
-
-    let tmpdir = tempfile::TempDir::new()?;
-    let outdir = tmpdir.path();
+    // canonicalize for docker volumes
     let outdir = fs::canonicalize(outdir).await?;
 
     for input in &mut req.inputs {
@@ -271,31 +256,69 @@ async fn exec_and_wait_inner(
         }
     }
 
-    let zip = zip_dir_into_bytes(&outdir)?;
-
     let duration = duration.unwrap_or_default();
-    let runtime = Runtime(duration.as_secs_f64());
-    Ok(ExecAndWaitSuccess { zip, runtime })
+
+    Ok(duration)
 }
 
 #[post("/exec_and_wait", data = "<req>")]
 pub async fn exec_and_wait(
     mut req: Form<ExecAndWaitRequest<'_>>,
     config: &State<config::Config>,
-) -> ExecAndWaitResult {
-    let rep = exec_and_wait_inner(&mut req, config).await;
-    let response = match rep {
-        Ok(success) => Ok(success),
+) -> ExecAndWaitResponse {
+    let tmpdir = tempfile::TempDir::new().unwrap();
+    let outdir = tmpdir.path();
+
+    let state = exec_and_wait_inner(&mut req, config, outdir).await;
+
+    let key = req.key.clone();
+    let params = req.params.0.clone();
+    let exec_info = match state {
+        Ok(duration) => ExecInfo {
+            key,
+            params,
+            status: "OK".into(),
+            error: None,
+            algo_info: AlgoInfo {
+                error_message: None,
+                run_time: Some(duration.as_secs_f64()),
+            },
+        },
         Err(err) => match err {
-            ExecError::Timeout(_) => Err(Json(ExecAndWaitError {
-                error_message: "IPOLTimeoutError".into(),
-            })),
-            _ => Err(Json(ExecAndWaitError {
-                error_message: err.to_string(),
-            })),
+            ExecError::Timeout(_) => ExecInfo {
+                key,
+                params,
+                status: "KO".into(),
+                error: Some("IPOLTimeoutError".into()),
+                algo_info: AlgoInfo {
+                    error_message: Some(err.to_string()),
+                    run_time: None,
+                },
+            },
+            _ => ExecInfo {
+                key,
+                params,
+                status: "KO".into(),
+                error: Some(err.to_string()),
+                algo_info: AlgoInfo {
+                    error_message: Some(err.to_string()),
+                    run_time: None,
+                },
+            },
         },
     };
-    response
+
+    let mut exec_info_file = fs::File::create(outdir.join("exec_info.json"))
+        .await
+        .unwrap();
+    let exec_info = serde_json::to_string_pretty(&exec_info).unwrap();
+    exec_info_file
+        .write_all(exec_info.as_bytes())
+        .await
+        .unwrap();
+
+    let zip = zip_dir_into_bytes(outdir).unwrap();
+    ExecAndWaitResponse { zip }
 }
 
 #[cfg(test)]
