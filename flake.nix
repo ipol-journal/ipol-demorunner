@@ -1,39 +1,31 @@
 {
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     naersk.url = "github:nix-community/naersk";
-    flake-compat = {
-      url = "github:edolstra/flake-compat";
-      flake = false;
-    };
   };
 
-  outputs = { self, nixpkgs, flake-utils, naersk, flake-compat }:
-    flake-utils.lib.eachDefaultSystem (
-      system: let
-        pkgs = nixpkgs.legacyPackages."${system}";
-        naersk-lib = naersk.lib."${system}";
+  outputs = { self, nixpkgs, flake-utils, naersk }:
+    flake-utils.lib.eachDefaultSystem (system:
+      let
+        pkgs = (import nixpkgs) {
+          inherit system;
+        };
+
+        naersk' = pkgs.callPackage naersk { };
+
       in
-        rec {
-          # `nix build`
-          packages.ipol-demorunner = naersk-lib.buildPackage {
-            pname = "ipol-demorunner";
-            root = ./.;
-            nativeBuildInputs = with pkgs; [ openssl pkgconfig ];
-          };
-          defaultPackage = packages.ipol-demorunner;
+      rec {
+        # For `nix build` & `nix run`
+        defaultPackage = naersk'.buildPackage {
+          src = ./.;
+          nativeBuildInputs = with pkgs; [ openssl pkgconfig ];
+        };
 
-          # `nix run`
-          apps.ipol-demorunner = flake-utils.lib.mkApp {
-            drv = packages.ipol-demorunner;
-          };
-          defaultApp = apps.ipol-demorunner;
-
-          # `nix develop`
-          devShell = pkgs.mkShell {
-            nativeBuildInputs = with pkgs; [ rustc cargo openssl pkgconfig ];
-          };
-        }
+        # For `nix develop`
+        devShell = pkgs.mkShell {
+          nativeBuildInputs = with pkgs; [ rustc cargo openssl pkgconfig ];
+        };
+      }
     );
 }
