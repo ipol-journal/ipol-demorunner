@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use bollard::models::DeviceRequest;
 use rocket::form::Form;
+use rocket::response::Responder;
 use rocket::serde::json::Json;
 use rocket::serde::{Deserialize, Serialize};
 use rocket::tokio::fs;
@@ -69,11 +70,30 @@ enum ExecError {
     Timeout(#[from] Elapsed),
     #[error("zip: {0}")]
     Zip(#[from] zip::result::ZipError),
-    #[error("io path: {0}")]
-    IOPath(#[from] std::path::StripPrefixError),
 }
 
-fn zip_dir_into_bytes(dir: &std::path::Path) -> Result<Vec<u8>, ExecError> {
+#[derive(Debug, thiserror::Error)]
+pub enum ExecAndWaitInternalError {
+    #[error("io: {0}")]
+    IO(#[from] std::io::Error),
+    #[error("io path: {0}")]
+    IOPath(#[from] std::path::StripPrefixError),
+    #[error("zip: {0}")]
+    Zip(#[from] zip::result::ZipError),
+    #[error("json: {0}")]
+    Json(#[from] serde_json::error::Error),
+}
+
+impl<'r> Responder<'r, 'static> for ExecAndWaitInternalError {
+    fn respond_to(self, req: &'r rocket::Request<'_>) -> rocket::response::Result<'static> {
+        let string = self.to_string();
+        rocket::Response::build_from(string.respond_to(req)?)
+            .status(rocket::http::Status::InternalServerError)
+            .ok()
+    }
+}
+
+fn zip_dir_into_bytes(dir: &std::path::Path) -> Result<Vec<u8>, ExecAndWaitInternalError> {
     let writer = std::io::Cursor::new(Vec::new());
     let mut zip = zip::ZipWriter::new(writer);
     let options = zip::write::FileOptions::default()
@@ -87,7 +107,7 @@ fn zip_dir_into_bytes(dir: &std::path::Path) -> Result<Vec<u8>, ExecError> {
         let filename = file.path();
 
         let name_in_zip = filename.strip_prefix(dir)?;
-        let name_in_zip = name_in_zip.to_str().unwrap();
+        let name_in_zip = name_in_zip.to_str().unwrap_or_default();
         if name_in_zip.is_empty() {
             continue;
         }
@@ -246,18 +266,15 @@ async fn exec_and_wait_inner(
             }
         }
 
-        if state.started_at.is_some() && state.finished_at.is_some() {
+        if let (Some(start), Some(end)) = (state.started_at, state.finished_at) {
             let now = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east(0));
-            let start = chrono::DateTime::parse_from_rfc3339(state.started_at.as_ref().unwrap())
-                .unwrap_or(now);
-            let end = chrono::DateTime::parse_from_rfc3339(state.finished_at.as_ref().unwrap())
-                .unwrap_or(now);
+            let start = chrono::DateTime::parse_from_rfc3339(&start).unwrap_or(now);
+            let end = chrono::DateTime::parse_from_rfc3339(&end).unwrap_or(now);
             duration = (end - start).to_std().ok();
         }
     }
 
     let duration = duration.unwrap_or_default();
-
     Ok(duration)
 }
 
@@ -265,8 +282,8 @@ async fn exec_and_wait_inner(
 pub async fn exec_and_wait(
     mut req: Form<ExecAndWaitRequest<'_>>,
     config: &State<config::Config>,
-) -> ExecAndWaitResponse {
-    let tmpdir = tempfile::TempDir::new().unwrap();
+) -> Result<ExecAndWaitResponse, ExecAndWaitInternalError> {
+    let tmpdir = tempfile::TempDir::new()?;
     let outdir = tmpdir.path();
 
     let state = exec_and_wait_inner(&mut req, config, outdir).await;
@@ -308,17 +325,12 @@ pub async fn exec_and_wait(
         },
     };
 
-    let mut exec_info_file = fs::File::create(outdir.join("exec_info.json"))
-        .await
-        .unwrap();
-    let exec_info = serde_json::to_string_pretty(&exec_info).unwrap();
-    exec_info_file
-        .write_all(exec_info.as_bytes())
-        .await
-        .unwrap();
+    let mut exec_info_file = fs::File::create(outdir.join("exec_info.json")).await?;
+    let exec_info = serde_json::to_string_pretty(&exec_info)?;
+    exec_info_file.write_all(exec_info.as_bytes()).await?;
 
-    let zip = zip_dir_into_bytes(outdir).unwrap();
-    ExecAndWaitResponse { zip }
+    let zip = zip_dir_into_bytes(outdir)?;
+    Ok(ExecAndWaitResponse { zip })
 }
 
 #[cfg(test)]
