@@ -328,6 +328,13 @@ mod test {
     use rocket::http::{ContentType, Status};
     use rocket::local::blocking::Client;
 
+    fn extract_exec_info(resp: &[u8]) -> ExecInfo {
+        let reader = std::io::Cursor::new(resp);
+        let mut zip = zip::ZipArchive::new(reader).unwrap();
+        let file = zip.by_name("exec_info.json").unwrap();
+        serde_json::from_reader(file).unwrap()
+    }
+
     #[test]
     fn test_exec_and_wait() {
         let client = Client::tracked(main_rocket()).expect("valid rocket instance");
@@ -355,14 +362,15 @@ mod test {
             ))
             .dispatch();
         assert_eq!(response.status(), Status::Ok);
-        let response: ExecAndWaitResponse = response.into_json().unwrap();
-        dbg!(&response);
-        assert_eq!(response.status, "OK");
-        assert_eq!(response.key, key);
-        assert_eq!(response.params, params);
-        assert_eq!(response.error, "");
-        assert_eq!(response.algo_info.error_message, "");
-        assert!(response.algo_info.run_time.is_some());
+        let response = response.into_bytes().unwrap();
+        let exec_info = extract_exec_info(&response);
+        dbg!(&exec_info);
+        assert_eq!(exec_info.status, "OK");
+        assert_eq!(exec_info.key, key);
+        assert_eq!(exec_info.params, params);
+        assert_eq!(exec_info.error, None);
+        assert_eq!(exec_info.algo_info.error_message, None);
+        assert!(exec_info.algo_info.run_time.is_some());
         std::thread::sleep(Duration::from_secs(1));
     }
 
@@ -381,22 +389,23 @@ mod test {
                 "t001",
                 key,
                 serde_json::to_string(&params).unwrap(),
-                serde_json::to_string(&ddl_run).unwrap(),
+                &ddl_run,
                 10,
             ))
             .dispatch();
         assert_eq!(response.status(), Status::Ok);
-        let response: ExecAndWaitResponse = response.into_json().unwrap();
-        dbg!(&response);
-        assert_eq!(response.status, "KO");
-        assert_eq!(response.key, key);
-        assert_eq!(response.params, params);
-        assert_eq!(response.error, "Non-zero exit code (5): a\n");
+        let response = response.into_bytes().unwrap();
+        let exec_info = extract_exec_info(&response);
+        dbg!(&exec_info);
+        assert_eq!(exec_info.status, "KO");
+        assert_eq!(exec_info.key, key);
+        assert_eq!(exec_info.params, params);
+        assert_eq!(exec_info.error, Some("Non-zero exit code (5): a\n".into()));
         assert_eq!(
-            response.algo_info.error_message,
-            "Non-zero exit code (5): a\n"
+            exec_info.algo_info.error_message,
+            Some("Non-zero exit code (5): a\n".into())
         );
-        assert!(response.algo_info.run_time.is_none());
+        assert!(exec_info.algo_info.run_time.is_none());
         std::thread::sleep(Duration::from_secs(1));
     }
 
@@ -415,22 +424,23 @@ mod test {
                 "t001",
                 key,
                 serde_json::to_string(&params).unwrap(),
-                serde_json::to_string(&ddl_run).unwrap(),
+                &ddl_run,
                 1,
             ))
             .dispatch();
         assert_eq!(response.status(), Status::Ok);
-        let response: ExecAndWaitResponse = response.into_json().unwrap();
-        dbg!(&response);
-        assert_eq!(response.status, "KO");
-        assert_eq!(response.key, key);
-        assert_eq!(response.params, params);
-        assert_eq!(response.error, "IPOLTimeoutError");
+        let response = response.into_bytes().unwrap();
+        let exec_info = extract_exec_info(&response);
+        dbg!(&exec_info);
+        assert_eq!(exec_info.status, "KO");
+        assert_eq!(exec_info.key, key);
+        assert_eq!(exec_info.params, params);
+        assert_eq!(exec_info.error, Some("IPOLTimeoutError".into()));
         assert_eq!(
-            response.algo_info.error_message,
-            "IPOLTimeoutError: Execution timeout"
+            exec_info.algo_info.error_message,
+            Some("IPOLTimeoutError: Execution timeout".into())
         );
-        assert!(response.algo_info.run_time.is_none());
+        assert!(exec_info.algo_info.run_time.is_none());
         std::thread::sleep(Duration::from_secs(1));
     }
 
@@ -449,19 +459,20 @@ mod test {
                 "t001",
                 key,
                 serde_json::to_string(&params).unwrap(),
-                serde_json::to_string(&ddl_run).unwrap(),
+                &ddl_run,
                 10,
             ))
             .dispatch();
         assert_eq!(response.status(), Status::Ok);
-        let response: ExecAndWaitResponse = response.into_json().unwrap();
-        dbg!(&response);
-        assert_eq!(response.status, "OK");
-        assert_eq!(response.key, key);
-        assert_eq!(response.params, params);
-        assert_eq!(response.error, "");
-        assert_eq!(response.algo_info.error_message, "");
-        assert!(response.algo_info.run_time > Some(1.5));
+        let response = response.into_bytes().unwrap();
+        let exec_info = extract_exec_info(&response);
+        dbg!(&exec_info);
+        assert_eq!(exec_info.status, "OK");
+        assert_eq!(exec_info.key, key);
+        assert_eq!(exec_info.params, params);
+        assert_eq!(exec_info.error, None);
+        assert_eq!(exec_info.algo_info.error_message, None);
+        assert!(exec_info.algo_info.run_time > Some(1.5));
         std::thread::sleep(Duration::from_secs(1));
     }
 }
