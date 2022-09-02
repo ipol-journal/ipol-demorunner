@@ -140,6 +140,9 @@ async fn exec_and_wait_inner(
             let filename = std::path::Path::new(filename);
 
             let dst = safe_path::scoped_join(&outdir, filename)?;
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent).await?;
+            }
             input.persist_to(dst).await?;
         }
     }
