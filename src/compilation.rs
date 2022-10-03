@@ -284,6 +284,8 @@ async fn ensure_compilation_inner(
         }
     }
 
+    buildlog.flush().await?;
+
     if errored {
         // NOTE: this leaves a dangling image, which can be removed with `docker image prune`
         return Err(CompilationError::BuildError(buildlogbuf));

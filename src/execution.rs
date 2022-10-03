@@ -258,6 +258,9 @@ async fn exec_and_wait_inner(
     })
     .await??;
 
+    stdout.flush().await?;
+    stderr.flush().await?;
+
     let options = Some(InspectContainerOptions { size: false });
     let inspect_response = docker.inspect_container(&name, options).await?;
 
@@ -328,9 +331,12 @@ pub async fn exec_and_wait(
         },
     };
 
-    let mut exec_info_file = fs::File::create(outdir.join("exec_info.json")).await?;
-    let exec_info = serde_json::to_string_pretty(&exec_info)?;
-    exec_info_file.write_all(exec_info.as_bytes()).await?;
+    {
+        let mut exec_info_file = fs::File::create(outdir.join("exec_info.json")).await?;
+        let exec_info = serde_json::to_string_pretty(&exec_info)?;
+        exec_info_file.write_all(exec_info.as_bytes()).await?;
+        exec_info_file.flush().await?;
+    }
 
     let zip = zip_dir_into_bytes(outdir)?;
     Ok(ExecAndWaitResponse { zip })
