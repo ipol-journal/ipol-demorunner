@@ -15,15 +15,31 @@ use bollard::{image::BuildImageOptions, Docker};
 
 use futures_util::stream::StreamExt;
 use git2::Repository;
+use secrecy::{ExposeSecret, SecretString};
 use tar::Builder;
 
 use crate::config;
 use crate::model::*;
 
+#[derive(Debug, Clone)]
+struct PrivateSSHKey(SecretString);
+
+impl From<String> for PrivateSSHKey {
+    fn from(s: String) -> Self {
+        Self(s.into())
+    }
+}
+
+impl<'r> rocket::form::FromFormField<'r> for PrivateSSHKey {
+    fn from_value(field: rocket::form::ValueField<'r>) -> rocket::form::Result<'r, Self> {
+        Ok(Self(field.value.to_string().into()))
+    }
+}
+
 #[derive(Debug, Clone, FromForm)]
 struct SSHKeyPair {
     public: String,
-    private: String,
+    private: PrivateSSHKey,
 }
 
 impl SSHKeyPair {
@@ -32,7 +48,10 @@ impl SSHKeyPair {
         // ex: .with_context("couldn't open the ssh key {}", pub_path)
         let public = std::fs::read_to_string(&format!("{path}.pub"))?;
         let private = std::fs::read_to_string(&path)?;
-        Ok(Self { public, private })
+        Ok(Self {
+            public,
+            private: private.into(),
+        })
     }
 }
 
@@ -144,7 +163,7 @@ fn prepare_git(
                 let ssh_pubkey = Some(key_pair.public.as_str());
                 let ssh_key = &key_pair.private;
                 match username_from_url {
-                    Some(username) => git2::Cred::ssh_key_from_memory(username, ssh_pubkey, ssh_key, None),
+                    Some(username) => git2::Cred::ssh_key_from_memory(username, ssh_pubkey, ssh_key.0.expose_secret(), None),
                     None => Err(git2::Error::from_str("git auth: couldn't parse the username from the url (make sure that the repository is public or that the url is formatted as such: 'https://<username>@...' or 'ssh://<username>@...')"))
                 }
             });
