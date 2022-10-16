@@ -93,6 +93,7 @@ impl<'r> Responder<'r, 'static> for ExecAndWaitInternalError {
     }
 }
 
+#[tracing::instrument(skip(dir))]
 fn zip_dir_into_bytes(dir: &std::path::Path) -> Result<Vec<u8>, ExecAndWaitInternalError> {
     let writer = std::io::Cursor::new(Vec::new());
     let mut zip = zip::ZipWriter::new(writer);
@@ -116,21 +117,25 @@ fn zip_dir_into_bytes(dir: &std::path::Path) -> Result<Vec<u8>, ExecAndWaitInter
             if let Ok(mut file) = std::fs::File::open(filename) {
                 zip.start_file(name_in_zip.to_string(), options)?;
                 std::io::copy(&mut file, &mut zip)?;
+                tracing::debug!("copy {filename:?} -> {name_in_zip:?}");
             }
         } else if file.file_type().is_dir() {
             zip.add_directory(name_in_zip.to_string(), options).ok();
+            tracing::debug!("add directory {name_in_zip:?}");
         }
     }
 
     Ok(zip.finish()?.into_inner())
 }
 
+#[tracing::instrument(skip(req, config, outdir))]
 async fn exec_and_wait_inner(
     req: &mut ExecAndWaitRequest<'_>,
     config: &config::Config,
     outdir: &std::path::Path,
 ) -> Result<Duration, ExecError> {
-    dbg!(&req);
+    tracing::debug!("{req:?}");
+
     // canonicalize for docker volumes
     let outdir = fs::canonicalize(outdir).await?;
 
@@ -143,6 +148,8 @@ async fn exec_and_wait_inner(
             if let Some(parent) = dst.parent() {
                 fs::create_dir_all(parent).await?;
             }
+            let size = input.len();
+            tracing::debug!("saving input {filename:?} ({size} bytes) to {dst:?}");
             input.persist_to(dst).await?;
         }
     }
@@ -200,8 +207,9 @@ async fn exec_and_wait_inner(
     };
 
     let docker = Docker::connect_with_socket_defaults()?;
+    tracing::debug!(name = name, image_name = image_name);
     let id = docker.create_container(options, container_config).await?.id;
-    dbg!(&id);
+    tracing::debug!(id = id);
 
     scopeguard::defer! {
         let docker = docker.clone();
@@ -211,12 +219,14 @@ async fn exec_and_wait_inner(
                 force: true,
                 ..Default::default()
             });
+            tracing::debug!("removing container {name:?}");
             if let Err(e) = docker.remove_container(&name, options).await {
-                error!("{}", e);
+                tracing::error!("{:?}", e);
             }
         });
     }
 
+    tracing::debug!("starting container {id:?}");
     docker.start_container::<String>(&id, None).await?;
 
     let mut output = String::new();
@@ -234,23 +244,23 @@ async fn exec_and_wait_inner(
         while let Some(msg) = logs.next().await {
             match msg {
                 Ok(LogOutput::StdOut { message }) => {
-                    println!("stdout: {message:#?}");
+                    tracing::info!("stdout: {message:#?}");
                     stdout.write_all(&message).await?;
                     output.push_str(&String::from_utf8_lossy(&message));
                 }
                 Ok(LogOutput::StdErr { message }) => {
-                    println!("stderr: {message:#?}");
+                    tracing::info!("stderr: {message:#?}");
                     stderr.write_all(&message).await?;
                     output.push_str(&String::from_utf8_lossy(&message));
                 }
                 Ok(LogOutput::StdIn { message }) => {
-                    println!("stdin: {message:#?}");
+                    tracing::info!("stdin: {message:#?}");
                 }
                 Ok(LogOutput::Console { message }) => {
-                    println!("console: {message:#?}");
+                    tracing::info!("console: {message:#?}");
                 }
                 Err(e) => {
-                    dbg!(&e);
+                    tracing::error!("{:?}", e);
                 }
             };
         }
@@ -268,6 +278,7 @@ async fn exec_and_wait_inner(
     if let Some(state) = inspect_response.state {
         if let Some(exit_code) = state.exit_code {
             if exit_code != 0 {
+                tracing::debug!("container exited with code {exit_code}");
                 return Err(ExecError::NonZeroExitCode(exit_code, output));
             }
         }
@@ -284,6 +295,7 @@ async fn exec_and_wait_inner(
     Ok(duration)
 }
 
+#[tracing::instrument(skip(req, config))]
 #[post("/exec_and_wait", data = "<req>")]
 pub async fn exec_and_wait(
     mut req: Form<ExecAndWaitRequest<'_>>,
@@ -339,6 +351,8 @@ pub async fn exec_and_wait(
     }
 
     let zip = zip_dir_into_bytes(outdir)?;
+    let size = zip.len();
+    tracing::info!("sending zip ({size} bytes)");
     Ok(ExecAndWaitResponse { zip })
 }
 

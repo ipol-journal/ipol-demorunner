@@ -874,6 +874,7 @@ dependencies = [
  "futures-util",
  "git2",
  "lazy_static",
+ "once_cell",
  "regex",
  "rocket",
  "safe-path",
@@ -884,6 +885,8 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror",
+ "tracing",
+ "tracing-subscriber",
  "walkdir",
  "zip",
 ]

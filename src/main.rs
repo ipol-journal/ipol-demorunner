@@ -1,3 +1,6 @@
+use once_cell::sync::Lazy;
+use tracing_subscriber::EnvFilter;
+
 #[macro_use]
 extern crate rocket;
 
@@ -14,8 +17,18 @@ const fn index() -> &'static str {
     "This is the IPOL DemoRunner module (docker)"
 }
 
+static TRACING: Lazy<()> = Lazy::new(|| {
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or(EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_env_filter(env_filter)
+        .init();
+});
+
 #[launch]
 fn main_rocket() -> _ {
+    Lazy::force(&TRACING);
+
     // TODO: restrict access to the service somehow
     rocket::build()
         .mount(
