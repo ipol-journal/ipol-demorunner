@@ -387,6 +387,7 @@ mod test {
     use crate::test::GIT_URL;
 
     #[test]
+    #[tracing_test::traced_test]
     fn test_ensure_compilation() {
         let client = Client::tracked(main_rocket()).expect("valid rocket instance");
         let ddl_build = DDLBuild {
@@ -415,6 +416,7 @@ mod test {
     }
 
     #[test]
+    #[tracing_test::traced_test]
     fn test_ensure_compilation_missing_dockerfile() {
         let client = Client::tracked(main_rocket()).expect("valid rocket instance");
         let ddl_build = DDLBuild {
@@ -443,6 +445,7 @@ mod test {
     }
 
     #[test]
+    #[tracing_test::traced_test]
     fn test_ensure_compilation_invalid_git_commit() {
         let client = Client::tracked(main_rocket()).expect("valid rocket instance");
         let ddl_build = DDLBuild {
@@ -472,6 +475,7 @@ mod test {
     }
 
     #[test]
+    #[tracing_test::traced_test]
     fn test_ensure_compilation_invalid_dockerfile() {
         let client = Client::tracked(main_rocket()).expect("valid rocket instance");
         let ddl_build = DDLBuild {
@@ -500,6 +504,7 @@ mod test {
     }
 
     #[test]
+    #[tracing_test::traced_test]
     fn test_ensure_compilation_build_error() {
         let client = Client::tracked(main_rocket()).expect("valid rocket instance");
         let ddl_build = DDLBuild {
@@ -525,6 +530,7 @@ mod test {
     }
 
     #[test]
+    #[tracing_test::traced_test]
     fn test_url_of_git_repository() {
         let tmpdir = tempfile::tempdir().unwrap();
         let path = tmpdir.path();
@@ -551,6 +557,7 @@ mod test {
     }
 
     #[test]
+    #[tracing_test::traced_test]
     fn test_prepare_git_private() {
         let tmpdir = tempfile::tempdir().unwrap();
         let path = tmpdir.path();
@@ -577,6 +584,7 @@ mod test {
     }
 
     #[test]
+    #[tracing_test::traced_test]
     fn test_prepare_invalid_git() {
         let tmpdir = tempfile::tempdir().unwrap();
         let path = tmpdir.path();

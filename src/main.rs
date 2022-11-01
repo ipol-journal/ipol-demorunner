@@ -1,4 +1,5 @@
 use once_cell::sync::Lazy;
+use rocket::{Build, Rocket};
 use tracing_subscriber::EnvFilter;
 
 #[macro_use]
@@ -25,11 +26,7 @@ static TRACING: Lazy<()> = Lazy::new(|| {
         .init();
 });
 
-#[launch]
-fn main_rocket() -> _ {
-    Lazy::force(&TRACING);
-
-    // TODO: restrict access to the service somehow
+fn main_rocket() -> Rocket<Build> {
     rocket::build()
         .mount(
             "/",
@@ -43,6 +40,12 @@ fn main_rocket() -> _ {
             ],
         )
         .attach(config::load_rocket_config())
+}
+
+#[launch]
+fn _main() -> _ {
+    Lazy::force(&TRACING);
+    main_rocket()
 }
 
 #[cfg(test)]

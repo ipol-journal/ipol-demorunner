@@ -23,6 +23,7 @@ mod test {
     use rocket::local::blocking::Client;
 
     #[test]
+    #[tracing_test::traced_test]
     fn test_get_workfload() {
         let client = Client::tracked(main_rocket()).expect("valid rocket instance");
         let response = client.get("/get_workload").dispatch();

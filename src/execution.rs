@@ -371,6 +371,7 @@ mod test {
     }
 
     #[test]
+    #[tracing_test::traced_test]
     fn test_exec_and_wait() {
         let client = Client::tracked(main_rocket()).expect("valid rocket instance");
 
@@ -410,6 +411,7 @@ mod test {
     }
 
     #[test]
+    #[tracing_test::traced_test]
     fn test_exec_and_wait_non_zero_exit_code() {
         let client = Client::tracked(main_rocket()).expect("valid rocket instance");
 
@@ -445,6 +447,7 @@ mod test {
     }
 
     #[test]
+    #[tracing_test::traced_test]
     fn test_exec_and_wait_timeout() {
         let client = Client::tracked(main_rocket()).expect("valid rocket instance");
 
@@ -480,6 +483,7 @@ mod test {
     }
 
     #[test]
+    #[tracing_test::traced_test]
     fn test_exec_and_wait_run_time() {
         let client = Client::tracked(main_rocket()).expect("valid rocket instance");
 
