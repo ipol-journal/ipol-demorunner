@@ -5,13 +5,13 @@ use tracing_subscriber::EnvFilter;
 #[macro_use]
 extern crate rocket;
 
-pub mod compilation;
-pub mod config;
-pub mod execution;
-pub mod model;
-pub mod ping;
-pub mod shutdown;
-pub mod workload;
+mod compilation;
+mod config;
+mod execution;
+mod model;
+mod ping;
+mod shutdown;
+mod workload;
 
 #[get("/")]
 const fn index() -> &'static str {
@@ -32,11 +32,11 @@ fn main_rocket() -> Rocket<Build> {
             "/",
             routes![
                 index,
-                ping::ping,
+                ping::http::ping,
                 shutdown::shutdown,
                 workload::get_workload,
                 compilation::ensure_compilation,
-                execution::exec_and_wait
+                execution::http::exec_and_wait
             ],
         )
         .attach(config::load_rocket_config())

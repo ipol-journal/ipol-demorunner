@@ -1,7 +1,8 @@
+use std::path::Path;
 use std::time::Duration;
 
 use bollard::models::DeviceRequest;
-use rocket::form::Form;
+use bollard::service::HostConfig;
 use rocket::response::Responder;
 use rocket::serde::json::Json;
 use rocket::serde::{Deserialize, Serialize};
@@ -9,7 +10,6 @@ use rocket::tokio::fs;
 use rocket::tokio::io::AsyncWriteExt;
 use rocket::tokio::time::error::Elapsed;
 use rocket::tokio::time::{timeout_at, Instant};
-use rocket::State;
 
 use bollard::container::{
     Config, CreateContainerOptions, InspectContainerOptions, LogOutput, LogsOptions,
@@ -32,12 +32,6 @@ pub struct ExecAndWaitRequest<'a> {
     ddl_run: DDLRun,
     timeout: Option<u64>,
     inputs: Vec<rocket::fs::TempFile<'a>>,
-}
-
-#[derive(Responder)]
-#[response(status = 200, content_type = "application/zip")]
-pub struct ExecAndWaitResponse {
-    zip: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -128,39 +122,28 @@ fn zip_dir_into_bytes(dir: &std::path::Path) -> Result<Vec<u8>, ExecAndWaitInter
     Ok(zip.finish()?.into_inner())
 }
 
-#[tracing::instrument(skip(req, config, outdir))]
-async fn exec_and_wait_inner(
-    req: &mut ExecAndWaitRequest<'_>,
-    config: &config::Config,
-    outdir: &std::path::Path,
-) -> Result<Duration, ExecError> {
-    tracing::debug!("{req:?}");
+#[tracing::instrument(skip(input, outdir))]
+async fn save_input<'a>(
+    input: &mut rocket::fs::TempFile<'a>,
+    outdir: &Path,
+) -> Result<(), ExecError> {
+    if let Some(filename) = input.raw_name() {
+        let filename = filename.dangerous_unsafe_unsanitized_raw().as_str();
+        let filename = std::path::Path::new(filename);
 
-    // canonicalize for docker volumes
-    let outdir = fs::canonicalize(outdir).await?;
-
-    for input in &mut req.inputs {
-        if let Some(filename) = input.raw_name() {
-            let filename = filename.dangerous_unsafe_unsanitized_raw().as_str();
-            let filename = std::path::Path::new(filename);
-
-            let dst = safe_path::scoped_join(&outdir, filename)?;
-            if let Some(parent) = dst.parent() {
-                fs::create_dir_all(parent).await?;
-            }
-            let size = input.len();
-            tracing::debug!("saving input {filename:?} ({size} bytes) to {dst:?}");
-            input.persist_to(dst).await?;
+        let dst = safe_path::scoped_join(&outdir, filename)?;
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent).await?;
         }
+        let size = input.len();
+        tracing::debug!("saving input {filename:?} ({size} bytes) to {dst:?}");
+        input.persist_to(dst).await?;
     }
+    Ok(())
+}
 
-    let image_name = format!("{}{}:latest", config.docker_image_prefix, req.demo_id);
-    let exec_mountpoint = &config.exec_workdir_in_docker;
-
-    let mut stderr = fs::File::create(outdir.join("stderr.txt")).await?;
-    let mut stdout = fs::File::create(outdir.join("stdout.txt")).await?;
-
-    let device_requests = if config.gpus.is_empty() {
+fn get_device_requests(config: &config::Config) -> Option<Vec<DeviceRequest>> {
+    if config.gpus.is_empty() {
         None
     } else {
         Some(vec![DeviceRequest {
@@ -170,69 +153,55 @@ async fn exec_and_wait_inner(
             capabilities: Some(vec![vec!["gpu".into()]]),
             options: None,
         }])
-    };
+    }
+}
 
-    let host_config = bollard::models::HostConfig {
-        binds: Some(vec![format!(
-            "{}:{}",
-            outdir.clone().to_str().unwrap(),
-            exec_mountpoint,
-        )]),
+fn get_docker_binds(config: &config::Config, outdir: &Path) -> Option<Vec<String>> {
+    let exec_mountpoint = &config.exec_workdir_in_docker;
+    Some(vec![format!(
+        "{}:{}",
+        outdir.clone().to_str().unwrap(),
+        exec_mountpoint,
+    )])
+}
+
+fn get_docker_host_config(config: &config::Config, outdir: &Path) -> HostConfig {
+    let device_requests = get_device_requests(&config);
+    let binds = get_docker_binds(&config, &outdir);
+    HostConfig {
+        binds,
         device_requests,
         ..Default::default()
-    };
-
-    let name = format!("{}{}-{}", config.docker_exec_prefix, req.demo_id, req.key);
-    let options = Some(CreateContainerOptions {
-        name: name.as_str(),
-    });
-
-    let env = req
-        .params
-        .0
-        .clone()
-        .into_iter()
-        .chain(config.env_vars.clone().into_iter())
-        .collect::<RunParams>()
-        .to_env_vec(&req.demo_id, &req.key);
-    let env = env.iter().map(|s| s as &str).collect();
-    let container_config = Config {
-        image: Some(image_name.as_str()),
-        user: Some(&config.user_uid_gid),
-        cmd: Some(vec!["/bin/bash", "-c", req.ddl_run.as_str()]),
-        env: Some(env),
-        working_dir: Some(exec_mountpoint),
-        host_config: Some(host_config),
-        ..Default::default()
-    };
-
-    let docker = Docker::connect_with_socket_defaults()?;
-    tracing::debug!(name = name, image_name = image_name);
-    let id = docker.create_container(options, container_config).await?.id;
-    tracing::debug!(id = id);
-
-    scopeguard::defer! {
-        let docker = docker.clone();
-        let name = name.clone();
-        rocket::tokio::spawn(async move {
-            let options = Some(RemoveContainerOptions {
-                force: true,
-                ..Default::default()
-            });
-            tracing::debug!("removing container {name:?}");
-            if let Err(e) = docker.remove_container(&name, options).await {
-                tracing::error!("{:?}", e);
-            }
-        });
     }
+}
 
-    tracing::debug!("starting container {id:?}");
-    docker.start_container::<String>(&id, None).await?;
+#[tracing::instrument(skip(docker))]
+async fn remove_container(docker: Docker, name: &str) -> Result<(), bollard::errors::Error> {
+    let options = Some(RemoveContainerOptions {
+        force: true,
+        ..Default::default()
+    });
+    tracing::debug!("removing container {name:?}");
+    docker.remove_container(&name, options).await
+}
 
-    let mut output = String::new();
+fn compute_timeout_deadline(config: &config::Config, req_timeout: Option<u64>) -> Instant {
     let max_timeout = config.max_timeout;
-    let timeout = req.timeout.map_or(max_timeout, |v| max_timeout.min(v));
-    let deadline = Instant::now() + Duration::from_secs(timeout);
+    let timeout = req_timeout.map_or(max_timeout, |v| max_timeout.min(v));
+    Instant::now() + Duration::from_secs(timeout)
+}
+
+#[tracing::instrument(skip(docker, deadline, outdir))]
+async fn read_logs_with_timeout(
+    docker: &Docker,
+    deadline: Instant,
+    id: &str,
+    outdir: &Path,
+) -> Result<String, ExecError> {
+    let mut output = String::new();
+
+    let mut stderr = fs::File::create(outdir.join("stderr.txt")).await?;
+    let mut stdout = fs::File::create(outdir.join("stdout.txt")).await?;
     timeout_at(deadline, async {
         let options = Some(LogsOptions::<String> {
             follow: true,
@@ -240,7 +209,7 @@ async fn exec_and_wait_inner(
             stderr: true,
             ..Default::default()
         });
-        let mut logs = docker.logs(&id, options);
+        let mut logs = docker.logs(id, options);
         while let Some(msg) = logs.next().await {
             match msg {
                 Ok(LogOutput::StdOut { message }) => {
@@ -270,8 +239,74 @@ async fn exec_and_wait_inner(
 
     stdout.flush().await?;
     stderr.flush().await?;
+    Ok(output)
+}
 
-    let options = Some(InspectContainerOptions { size: false });
+#[tracing::instrument(skip(req, config, outdir))]
+async fn exec_and_wait_inner(
+    req: &mut ExecAndWaitRequest<'_>,
+    config: &config::Config,
+    outdir: &std::path::Path,
+) -> Result<Duration, ExecError> {
+    tracing::debug!("{req:?}");
+
+    // canonicalize for docker volumes
+    let outdir = fs::canonicalize(outdir).await?;
+
+    for input in &mut req.inputs {
+        save_input(input, &outdir).await?;
+    }
+
+    let image_name = format!("{}{}:latest", config.docker_image_prefix, req.demo_id);
+
+    let name = format!("{}{}-{}", config.docker_exec_prefix, req.demo_id, req.key);
+    let options = Some(CreateContainerOptions {
+        name: name.as_str(),
+    });
+
+    let env = req
+        .params
+        .0
+        .clone()
+        .into_iter()
+        .chain(config.env_vars.clone().into_iter())
+        .collect::<RunParams>()
+        .to_env_vec(&req.demo_id, &req.key);
+    let env = env.iter().map(|s| s as &str).collect();
+    let exec_mountpoint = &config.exec_workdir_in_docker;
+    let host_config = get_docker_host_config(&config, &outdir);
+    let container_config = Config {
+        image: Some(image_name.as_str()),
+        user: Some(&config.user_uid_gid),
+        cmd: Some(vec!["/bin/bash", "-c", req.ddl_run.as_str()]),
+        env: Some(env),
+        working_dir: Some(exec_mountpoint),
+        host_config: Some(host_config),
+        ..Default::default()
+    };
+
+    let docker = Docker::connect_with_socket_defaults()?;
+    tracing::debug!(name = name, image_name = image_name);
+    let id = docker.create_container(options, container_config).await?.id;
+    tracing::debug!(id = id);
+
+    scopeguard::defer! {
+        let docker = docker.clone();
+        let name = name.clone();
+        rocket::tokio::spawn(async move {
+            if let Err(e) = remove_container(docker, &name).await {
+                tracing::error!("{:?}", e);
+            }
+        });
+    }
+
+    tracing::debug!("starting container {id:?}");
+    docker.start_container::<String>(&id, None).await?;
+
+    let deadline = compute_timeout_deadline(&config, req.timeout);
+    let output = read_logs_with_timeout(&docker, deadline, &id, &outdir).await?;
+
+    let options = Some(InspectContainerOptions::default());
     let inspect_response = docker.inspect_container(&name, options).await?;
 
     let mut duration = None;
@@ -295,65 +330,87 @@ async fn exec_and_wait_inner(
     Ok(duration)
 }
 
-#[tracing::instrument(skip(req, config))]
-#[post("/exec_and_wait", data = "<req>")]
-pub async fn exec_and_wait(
-    mut req: Form<ExecAndWaitRequest<'_>>,
-    config: &State<config::Config>,
-) -> Result<ExecAndWaitResponse, ExecAndWaitInternalError> {
-    let tmpdir = tempfile::TempDir::new()?;
-    let outdir = tmpdir.path();
+async fn save_exec_info(
+    exec_info: &ExecInfo,
+    outdir: &Path,
+) -> Result<(), ExecAndWaitInternalError> {
+    let mut exec_info_file = fs::File::create(outdir.join("exec_info.json")).await?;
+    let exec_info = serde_json::to_string_pretty(exec_info)?;
+    exec_info_file.write_all(exec_info.as_bytes()).await?;
+    exec_info_file.flush().await?;
+    Ok(())
+}
 
-    let state = exec_and_wait_inner(&mut req, config, outdir).await;
+pub mod http {
+    use rocket::form::Form;
+    use rocket::State;
 
-    let key = req.key.clone();
-    let params = req.params.0.clone();
-    let exec_info = match state {
-        Ok(duration) => ExecInfo {
-            key,
-            params,
-            status: "OK".into(),
-            error: None,
-            algo_info: AlgoInfo {
-                error_message: None,
-                run_time: Some(duration.as_secs_f64()),
-            },
-        },
-        Err(err) => match err {
-            ExecError::Timeout(_) => ExecInfo {
-                key,
-                params,
-                status: "KO".into(),
-                error: Some("IPOLTimeoutError".into()),
-                algo_info: AlgoInfo {
-                    error_message: Some(err.to_string()),
-                    run_time: None,
-                },
-            },
-            _ => ExecInfo {
-                key,
-                params,
-                status: "KO".into(),
-                error: Some(err.to_string()),
-                algo_info: AlgoInfo {
-                    error_message: Some(err.to_string()),
-                    run_time: None,
-                },
-            },
-        },
+    use super::{
+        exec_and_wait_inner, save_exec_info, zip_dir_into_bytes, AlgoInfo,
+        ExecAndWaitInternalError, ExecAndWaitRequest, ExecError, ExecInfo,
     };
+    use crate::config;
 
-    {
-        let mut exec_info_file = fs::File::create(outdir.join("exec_info.json")).await?;
-        let exec_info = serde_json::to_string_pretty(&exec_info)?;
-        exec_info_file.write_all(exec_info.as_bytes()).await?;
-        exec_info_file.flush().await?;
+    #[derive(Responder)]
+    #[response(status = 200, content_type = "application/zip")]
+    pub struct ExecAndWaitResponse {
+        zip: Vec<u8>,
     }
 
-    let zip = zip_dir_into_bytes(outdir)?;
-    let size = zip.len();
-    tracing::info!("sending zip ({size} bytes)");
-    Ok(ExecAndWaitResponse { zip })
+    #[tracing::instrument(skip(req, config))]
+    #[post("/exec_and_wait", data = "<req>")]
+    pub async fn exec_and_wait(
+        mut req: Form<ExecAndWaitRequest<'_>>,
+        config: &State<config::Config>,
+    ) -> Result<ExecAndWaitResponse, ExecAndWaitInternalError> {
+        let tmpdir = tempfile::TempDir::new()?;
+        let outdir = tmpdir.path();
+
+        let state = exec_and_wait_inner(&mut req, config, outdir).await;
+
+        let key = req.key.clone();
+        let params = req.params.0.clone();
+        let exec_info = match state {
+            Ok(duration) => ExecInfo {
+                key,
+                params,
+                status: "OK".into(),
+                error: None,
+                algo_info: AlgoInfo {
+                    error_message: None,
+                    run_time: Some(duration.as_secs_f64()),
+                },
+            },
+            Err(err) => match err {
+                ExecError::Timeout(_) => ExecInfo {
+                    key,
+                    params,
+                    status: "KO".into(),
+                    error: Some("IPOLTimeoutError".into()),
+                    algo_info: AlgoInfo {
+                        error_message: Some(err.to_string()),
+                        run_time: None,
+                    },
+                },
+                _ => ExecInfo {
+                    key,
+                    params,
+                    status: "KO".into(),
+                    error: Some(err.to_string()),
+                    algo_info: AlgoInfo {
+                        error_message: Some(err.to_string()),
+                        run_time: None,
+                    },
+                },
+            },
+        };
+
+        save_exec_info(&exec_info, outdir).await?;
+        let zip = zip_dir_into_bytes(outdir)?;
+        let size = zip.len();
+        tracing::info!("sending zip ({size} bytes)");
+        Ok(ExecAndWaitResponse { zip })
+    }
 }
 
 #[cfg(test)]
