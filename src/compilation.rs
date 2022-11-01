@@ -139,18 +139,22 @@ impl GitFetcherBuilder {
     }
 }
 
+#[tracing::instrument(skip(git_fetcher, url, rev))]
 fn prepare_git(
     git_fetcher: &GitFetcher,
     path: &Path,
     url: &str,
     rev: &str,
 ) -> Result<String, CompilationError> {
+    tracing::debug!("preparing the git folder {url}:{rev} to {path:?}");
     // NOTE: libgit2 does not support shallow fetches yet
     if let Some(current_url) = url_of_git_repository(path) {
         if current_url != url {
+            tracing::debug!("the current url is different, removing {path:?}");
             std::fs::remove_dir_all(path)?;
         }
     } else if path.exists() {
+        tracing::debug!("couldn't get the current url but the path exists, removing {path:?}");
         std::fs::remove_dir_all(path)?;
     }
 
@@ -177,6 +181,7 @@ fn prepare_git(
     let repo = if path.exists() {
         Repository::open(path)?
     } else {
+        tracing::debug!("cloning the repo");
         let fo = get_fetch_options();
         let mut builder = git2::build::RepoBuilder::new();
         builder.fetch_options(fo);
@@ -184,15 +189,18 @@ fn prepare_git(
     };
 
     {
+        tracing::debug!("fetching origin");
         let mut fo = get_fetch_options();
         let mut remote = repo.find_remote("origin")?;
         remote.fetch::<&str>(&[], Some(&mut fo), None)?;
     }
 
     // TODO: support "master" as rev instead of "origin/master"?
+    tracing::debug!("revparsing {rev}");
     let commit_id = repo.revparse_single(rev)?.peel_to_commit()?.id();
     repo.set_head_detached(commit_id)?;
 
+    tracing::debug!("checking out {rev} = {commit_id}");
     let mut checkout = git2::build::CheckoutBuilder::new();
     checkout.force();
     repo.checkout_head(Some(&mut checkout))?;
@@ -202,11 +210,12 @@ fn prepare_git(
     Ok(commit_id.to_string())
 }
 
+#[tracing::instrument(skip(req, config))]
 async fn ensure_compilation_inner(
     req: Form<EnsureCompilationRequest>,
     config: &State<config::Config>,
 ) -> Result<(), CompilationError> {
-    dbg!(&req);
+    tracing::debug!("{req:?}");
 
     let compilation_path = PathBuf::from(&config.compilation_root).join(&req.demo_id);
     let srcdir = PathBuf::from(&compilation_path).join("src");
@@ -232,10 +241,9 @@ async fn ensure_compilation_inner(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Interrupted, e))??
     };
 
-    if !PathBuf::from(&srcdir)
-        .join(&req.ddl_build.dockerfile)
-        .exists()
-    {
+    let dockerfile_path = PathBuf::from(&srcdir).join(&req.ddl_build.dockerfile);
+    if !dockerfile_path.exists() {
+        tracing::warn!("could not find the dockerfile at {dockerfile_path:?}");
         return Err(CompilationError::MissingDockerfile(
             req.ddl_build.dockerfile.clone(),
         ));
@@ -259,6 +267,7 @@ async fn ensure_compilation_inner(
         img.repo_tags.iter().any(|t| t == &image_name_with_tag)
             && img.repo_tags.iter().any(|t| t == &image_name_with_latest)
     }) {
+        tracing::debug!("docker image {image_name_with_tag} already exists, do not rebuild");
         buildlog
             .write_all(format!("(docker image already exists for commit {})", git_rev).as_bytes())
             .await?;
@@ -275,6 +284,7 @@ async fn ensure_compilation_inner(
     };
 
     let vec = {
+        tracing::debug!("building the tar containing the source code");
         let srcdir = srcdir.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CompilationError> {
             let mut ar = Builder::new(Vec::new());
@@ -311,9 +321,10 @@ async fn ensure_compilation_inner(
     }
 
     for image in current_images {
+        let id = image.id;
         match docker
             .remove_image(
-                &image.id,
+                &id,
                 Some(RemoveImageOptions {
                     force: true,
                     ..Default::default()
@@ -323,10 +334,10 @@ async fn ensure_compilation_inner(
             .await
         {
             Ok(_) => {
-                println!("removed old image {}", image.id);
+                tracing::info!("removed old image {id}");
             }
             Err(err) => {
-                println!("warning: error while removing {}: {}", image.id, err);
+                tracing::error!("error while removing {id}: {err}");
             }
         }
     }
