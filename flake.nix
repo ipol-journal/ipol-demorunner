@@ -2,7 +2,10 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    naersk.url = "github:nix-community/naersk";
+    naersk = {
+      url = "github:nix-community/naersk";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs = { self, nixpkgs, flake-utils, naersk }:
@@ -15,7 +18,7 @@
         naersk' = pkgs.callPackage naersk { };
 
       in
-      rec {
+      {
         # For `nix build` & `nix run`
         defaultPackage = naersk'.buildPackage {
           src = ./.;
