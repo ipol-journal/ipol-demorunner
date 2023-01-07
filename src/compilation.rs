@@ -44,6 +44,7 @@ struct SSHKeyPair {
 }
 
 impl SSHKeyPair {
+    #[cfg(test)]
     fn from_path(path: &str) -> Result<Self, std::io::Error> {
         // TODO: use anyhow to add context
         // ex: .with_context("couldn't open the ssh key {}", pub_path)
@@ -227,14 +228,7 @@ async fn ensure_compilation_inner(
     let git_rev = {
         let srcdir = srcdir.clone();
         let ddl_build = req.ddl_build.clone();
-        let ssh_key_from_file = if let Some(path) = &config.ssh_key_path {
-            Some(SSHKeyPair::from_path(path)?)
-        } else {
-            None
-        };
-        let git_fetcher = GitFetcher::builder()
-            .ssh_key(req.ssh_key.clone().or(ssh_key_from_file))
-            .build()?;
+        let git_fetcher = GitFetcher::builder().ssh_key(req.ssh_key.clone()).build()?;
         tokio::task::spawn_blocking(move || {
             prepare_git(&git_fetcher, &srcdir, &ddl_build.url, &ddl_build.rev)
         })

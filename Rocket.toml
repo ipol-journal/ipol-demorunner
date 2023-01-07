@@ -7,8 +7,6 @@ user_uid_gid = "1000:1000"
 env_vars = {}
 # see https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/user-guide.html#gpu-enumeration
 gpus = []
-# generate with: ssh-keygen -t ed25519 -f id_ed25519
-#ssh_key_path = "id_ed25519"
 # see https://docs.rs/rocket/0.5.0-rc.2/rocket/data/struct.Limits.html
 limits = {"file"="500MB", "data-form"="500MB"}
 #registry_url = "localhost:7799"
