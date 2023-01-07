@@ -140,7 +140,7 @@ async fn save_input<'a>(
         let filename = filename.dangerous_unsafe_unsanitized_raw().as_str();
         let filename = std::path::Path::new(filename);
 
-        let dst = safe_path::scoped_join(&outdir, filename)?;
+        let dst = safe_path::scoped_join(outdir, filename)?;
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent).await?;
         }
@@ -169,14 +169,14 @@ fn get_docker_binds(config: &config::Config, outdir: &Path) -> Option<Vec<String
     let exec_mountpoint = &config.exec_workdir_in_docker;
     Some(vec![format!(
         "{}:{}",
-        outdir.clone().to_str().unwrap(),
+        outdir.to_str().unwrap(),
         exec_mountpoint,
     )])
 }
 
 fn get_docker_host_config(config: &config::Config, outdir: &Path) -> HostConfig {
-    let device_requests = get_device_requests(&config);
-    let binds = get_docker_binds(&config, &outdir);
+    let device_requests = get_device_requests(config);
+    let binds = get_docker_binds(config, outdir);
     HostConfig {
         binds,
         device_requests,
@@ -191,7 +191,7 @@ async fn remove_container(docker: Docker, name: &str) -> Result<(), bollard::err
         ..Default::default()
     });
     tracing::debug!("removing container {name:?}");
-    docker.remove_container(&name, options).await
+    docker.remove_container(name, options).await
 }
 
 fn compute_timeout_deadline(config: &config::Config, req_timeout: Option<u64>) -> Instant {
@@ -311,7 +311,7 @@ async fn exec_and_wait_inner(
         .to_env_vec(&req.demo_id, &req.key);
     let env = env.iter().map(|s| s as &str).collect();
     let exec_mountpoint = &config.exec_workdir_in_docker;
-    let host_config = get_docker_host_config(&config, &outdir);
+    let host_config = get_docker_host_config(config, &outdir);
     let container_config = Config {
         image: Some(image_name.as_str()),
         user: Some(&config.user_uid_gid),
@@ -339,7 +339,7 @@ async fn exec_and_wait_inner(
     tracing::debug!("starting container {id:?}");
     docker.start_container::<String>(&id, None).await?;
 
-    let deadline = compute_timeout_deadline(&config, req.timeout);
+    let deadline = compute_timeout_deadline(config, req.timeout);
     let output = read_logs_with_timeout(&docker, deadline, &id, &outdir).await?;
 
     let options = Some(InspectContainerOptions::default());
@@ -355,7 +355,8 @@ async fn exec_and_wait_inner(
         }
 
         if let (Some(start), Some(end)) = (state.started_at, state.finished_at) {
-            let now = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east(0));
+            let timezone = chrono::FixedOffset::east_opt(0).unwrap();
+            let now = chrono::Utc::now().with_timezone(&timezone);
             let start = chrono::DateTime::parse_from_rfc3339(&start).unwrap_or(now);
             let end = chrono::DateTime::parse_from_rfc3339(&end).unwrap_or(now);
             duration = (end - start).to_std().ok();
