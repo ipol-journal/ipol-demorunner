@@ -48,8 +48,8 @@ impl SSHKeyPair {
     fn from_path(path: &str) -> Result<Self, std::io::Error> {
         // TODO: use anyhow to add context
         // ex: .with_context("couldn't open the ssh key {}", pub_path)
-        let public = std::fs::read_to_string(&format!("{path}.pub"))?;
-        let private = std::fs::read_to_string(&path)?;
+        let public = std::fs::read_to_string(format!("{path}.pub"))?;
+        let private = std::fs::read_to_string(path)?;
         Ok(Self {
             public,
             private: private.into(),
