@@ -10,7 +10,7 @@ serde = { version = "1.0", features = ["derive"] }
 git2 = "0.15"
 zip = "0.6"
 tar = "0.4"
-bollard = "0.13"
+bollard = "0.14"
 futures-util = "0.3"
 serde_json = "1.0"
 scopeguard = "1.1"

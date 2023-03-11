@@ -299,6 +299,7 @@ async fn exec_and_wait_inner(
     let name = format!("{}{}-{}", config.docker_exec_prefix, req.demo_id, req.key);
     let options = Some(CreateContainerOptions {
         name: name.as_str(),
+        platform: None,
     });
 
     let env = req

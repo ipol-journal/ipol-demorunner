@@ -77,9 +77,9 @@ pub struct EnsureCompilationResponse {
 enum CompilationError {
     #[error("Compilation error")]
     BuildError(String),
-    #[error("ipol-demorunner/io: {0}")]
+    #[error("ipol-demorunner/io: {0:?}")]
     IO(#[from] std::io::Error),
-    #[error("ipol-demorunner/docker: {0}")]
+    #[error("ipol-demorunner/docker: {0:?}")]
     Docker(#[from] bollard::errors::Error),
     #[error("ipol-demorunner/git: {0}")]
     Git(#[from] git2::Error),
@@ -331,19 +331,33 @@ async fn ensure_compilation_inner(
     };
     let tar = Body::from(vec);
 
+    tracing::debug!("launching docker build_image");
     let mut image_build_stream = docker.build_image(build_image_options, None, Some(tar));
     let mut buildlogbuf = String::new();
     let mut errored = false;
     while let Some(msg) = image_build_stream.next().await {
-        let info = msg?;
-        if let Some(stream) = info.stream {
-            buildlog.write_all(stream.as_bytes()).await?;
-            buildlogbuf.push_str(&stream);
-        }
-        if let Some(err) = info.error {
-            buildlog.write_all(err.as_bytes()).await?;
-            buildlogbuf.push_str(&err);
-            errored = true;
+        match msg {
+            Ok(info) => {
+                if let Some(stream) = info.stream {
+                    buildlog.write_all(stream.as_bytes()).await?;
+                    buildlogbuf.push_str(&stream);
+                }
+                if let Some(err) = info.error {
+                    // this case should not happen since bollard v0.14.0
+                    // commit a1fad80acf71f8ec5af476095377b76608bcc8a0
+                    buildlog.write_all(err.as_bytes()).await?;
+                    buildlogbuf.push_str(&err);
+                    errored = true;
+                }
+            }
+            Err(err) => {
+                // use the Debug trait instead of Display, because DockerStreamError
+                // does not show enough info about the error in its formatting
+                let err = format!("{err:?}");
+                buildlog.write_all(err.as_bytes()).await?;
+                buildlogbuf.push_str(&err);
+                errored = true;
+            }
         }
     }
 
@@ -351,8 +365,11 @@ async fn ensure_compilation_inner(
 
     if errored {
         // NOTE: this leaves a dangling image, which can be removed with `docker image prune`
+        tracing::info!("image building failed");
         return Err(CompilationError::BuildError(buildlogbuf));
     }
+
+    tracing::info!("image building successful");
 
     for image in current_images {
         let id = image.id;
@@ -548,14 +565,11 @@ mod test {
             ))
             .dispatch();
         assert_eq!(response.status(), Status::Ok);
-        assert_eq!(
-            response.into_json(),
-            Some(EnsureCompilationResponse {
-                status: "KO".into(),
-                message: "ipol-demorunner/docker: Docker responded with status code 400: dockerfile parse error line 1: unknown instruction: CFLAGS=".into(),
-                buildlog: None,
-            })
-            );
+
+        let r: EnsureCompilationResponse = response.into_json().unwrap();
+        assert_eq!(r.status, "KO");
+        assert_eq!(r.message, "Compilation error");
+        assert!(!r.buildlog.unwrap().is_empty());
     }
 
     #[test]
