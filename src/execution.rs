@@ -20,6 +20,7 @@ use bollard::Docker;
 
 use futures_util::stream::StreamExt;
 
+use crate::compilation::get_git_revision;
 use crate::config;
 use crate::model::*;
 
@@ -67,12 +68,6 @@ enum ExecError {
     Zip(#[from] zip::result::ZipError),
     #[error("ipol-demorunner/exec/git: {0}")]
     Git(#[from] git2::Error),
-}
-
-fn get_git_revision(src_path: PathBuf) -> Result<String, git2::Error> {
-    let repo = git2::Repository::open(src_path)?;
-    let commit_id = repo.head()?.peel_to_commit()?.id();
-    Ok(commit_id.to_string())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -267,10 +262,12 @@ async fn exec_and_wait_inner(
         save_input(input, &outdir).await?;
     }
 
+    // TODO/IPOL: it would be better if the git_rev were provided in the payload
     let src_path = PathBuf::from(&config.compilation_root)
         .join(&req.demo_id)
         .join("src");
-    let git_rev = get_git_revision(src_path)?;
+    let git_rev = get_git_revision(&src_path)?;
+
     let registry = config
         .registry_url
         .as_ref()

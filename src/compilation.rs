@@ -141,6 +141,12 @@ impl GitFetcherBuilder {
     }
 }
 
+pub fn get_git_revision(src_path: &Path) -> Result<String, git2::Error> {
+    let repo = git2::Repository::open(src_path)?;
+    let commit_id = repo.head()?.peel_to_commit()?.id();
+    Ok(commit_id.to_string())
+}
+
 #[tracing::instrument(skip(git_fetcher, url, rev))]
 fn prepare_git(
     git_fetcher: &GitFetcher,
@@ -149,6 +155,7 @@ fn prepare_git(
     rev: &str,
 ) -> Result<String, CompilationError> {
     tracing::debug!("preparing the git folder {url}:{rev} to {path:?}");
+
     // NOTE: libgit2 does not support shallow fetches yet
     if let Some(current_url) = url_of_git_repository(path) {
         if current_url != url {
@@ -158,6 +165,14 @@ fn prepare_git(
     } else if path.exists() {
         tracing::debug!("couldn't get the current url but the path exists, removing {path:?}");
         std::fs::remove_dir_all(path)?;
+    }
+
+    // if the current commit is the requested one, we're done
+    if let Ok(current_head) = get_git_revision(path) {
+        if rev == current_head {
+            tracing::debug!("the current head is already the requested revision");
+            return Ok(current_head);
+        }
     }
 
     let get_fetch_options = || {
