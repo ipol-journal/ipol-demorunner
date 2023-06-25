@@ -3,7 +3,7 @@ pipeline:
     image: nixos/nix
     commands:
     - nix --extra-experimental-features nix-command --extra-experimental-features flakes flake check -L
-    - nix --extra-experimental-features nix-command --extra-experimental-features flakes build .#defaultPackage.x86_64-linux -L
+    - nix --extra-experimental-features nix-command --extra-experimental-features flakes build .#default -L
     volumes:
     # https://releases.nixos.org/nix-dev/2017-June/023903.html
     - nix:/nix/
