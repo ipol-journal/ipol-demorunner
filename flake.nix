@@ -23,14 +23,18 @@
         naersk' = pkgs.callPackage naersk {};
       in {
         # For `nix build` & `nix run`
-        defaultPackage = naersk'.buildPackage {
-          src = ./.;
-          nativeBuildInputs = with pkgs; [openssl pkgconfig];
+        packages = {
+          default = naersk'.buildPackage {
+            src = ./.;
+            nativeBuildInputs = with pkgs; [openssl pkgconfig];
+          };
         };
 
         # For `nix develop`
-        devShell = pkgs.mkShell {
-          nativeBuildInputs = with pkgs; [rustc cargo openssl pkgconfig];
+        devShells = {
+          default = pkgs.mkShell {
+            nativeBuildInputs = with pkgs; [rustc cargo openssl pkgconfig];
+          };
         };
       }
     );
