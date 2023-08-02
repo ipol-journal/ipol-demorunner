@@ -4,8 +4,10 @@ use std::time::Duration;
 
 use bollard::auth::DockerCredentials;
 use bollard::image::{ListImagesOptions, RemoveImageOptions};
-use rocket::form::Form;
+
 use rocket::http::hyper::Body;
+use rocket::http::Status;
+use rocket::response::status;
 use rocket::serde::json::Json;
 use rocket::serde::{Deserialize, Serialize};
 use rocket::tokio::fs;
@@ -17,13 +19,21 @@ use bollard::{image::BuildImageOptions, Docker};
 use futures_util::stream::StreamExt;
 use git2::Repository;
 use secrecy::{ExposeSecret, SecretString};
+use serde::Serializer;
 use tar::Builder;
 
 use crate::config;
 use crate::model::*;
 
-#[derive(Debug, Clone)]
-struct PrivateSSHKey(SecretString);
+fn serialize_secret<S>(secret: &SecretString, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(secret.expose_secret())
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct PrivateSSHKey(#[serde(serialize_with = "serialize_secret")] SecretString);
 
 impl From<String> for PrivateSSHKey {
     fn from(s: String) -> Self {
@@ -31,15 +41,11 @@ impl From<String> for PrivateSSHKey {
     }
 }
 
-impl<'r> rocket::form::FromFormField<'r> for PrivateSSHKey {
-    fn from_value(field: rocket::form::ValueField<'r>) -> rocket::form::Result<'r, Self> {
-        Ok(Self(field.value.to_string().into()))
-    }
-}
-
-#[derive(Debug, Clone, FromForm)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct SSHKeyPair {
+    #[serde(rename = "public_key")]
     public: String,
+    #[serde(rename = "private_key")]
     private: PrivateSSHKey,
 }
 
@@ -57,17 +63,16 @@ impl SSHKeyPair {
     }
 }
 
-#[derive(Debug, FromForm)]
-pub struct EnsureCompilationRequest {
-    #[field(validate=validate_demoid())]
-    demo_id: DemoID,
-    ddl_build: Json<DDLBuild>,
+#[derive(Debug, Deserialize, Serialize)]
+pub struct CompilationRequest {
+    ddl_build: DDLBuild,
+    #[serde(rename = "ssh_keys")]
     ssh_key: Option<SSHKeyPair>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct EnsureCompilationResponse {
-    status: String,
+pub struct CompilationResponse {
+    #[serde(rename = "detail")]
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     buildlog: Option<String>,
@@ -229,12 +234,13 @@ fn prepare_git(
 
 #[tracing::instrument(skip(req, config))]
 async fn ensure_compilation_inner(
-    req: Form<EnsureCompilationRequest>,
+    demo_id: DemoID,
+    req: &CompilationRequest,
     config: &State<config::Config>,
 ) -> Result<(), CompilationError> {
     tracing::debug!("{req:?}");
 
-    let compilation_path = PathBuf::from(&config.compilation_root).join(&req.demo_id);
+    let compilation_path = PathBuf::from(&config.compilation_root).join(demo_id.as_ref());
     let srcdir = PathBuf::from(&compilation_path).join("src");
     let logfile = PathBuf::from(&compilation_path).join("build.log");
     fs::create_dir_all(&compilation_path).await?;
@@ -266,7 +272,7 @@ async fn ensure_compilation_inner(
         .as_ref()
         .map_or(String::new(), |url| (url.clone() + "/"));
 
-    let image_name = format!("{}{}{}", registry, config.docker_image_prefix, req.demo_id);
+    let image_name = format!("{}{}{}", registry, config.docker_image_prefix, &demo_id);
     let image_name_with_tag = format!("{}:{}", image_name, git_rev);
 
     let mut pulled = true;
@@ -437,94 +443,98 @@ async fn ensure_compilation_inner(
     Ok(())
 }
 
-#[post("/ensure_compilation", data = "<req>")]
+#[post("/compilations/<demo_id>", data = "<req>")]
 pub async fn ensure_compilation(
-    req: Form<EnsureCompilationRequest>,
+    demo_id: DemoID,
+    req: Json<CompilationRequest>,
     config: &State<config::Config>,
-) -> Json<EnsureCompilationResponse> {
-    let response = match ensure_compilation_inner(req, config).await {
-        Ok(()) => EnsureCompilationResponse {
-            status: "OK".into(),
-            message: String::new(),
-            buildlog: None,
-        },
+) -> Result<status::Custom<()>, status::Custom<Json<CompilationResponse>>> {
+    let response = match ensure_compilation_inner(demo_id, &req, config).await {
+        Ok(()) => {
+            return Ok(status::Custom(Status::Created, ()));
+        }
         Err(err) => match err {
-            CompilationError::BuildError(ref buildlog) => EnsureCompilationResponse {
-                status: "KO".into(),
+            CompilationError::BuildError(ref buildlog) => CompilationResponse {
                 message: err.to_string(),
                 buildlog: Some(buildlog.clone()),
             },
-            _ => EnsureCompilationResponse {
-                status: "KO".into(),
+            _ => CompilationResponse {
                 message: err.to_string(),
                 buildlog: None,
             },
         },
     };
-    Json(response)
+    dbg!(&response);
+    Err(status::Custom(Status::InternalServerError, Json(response)))
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::main_rocket;
-    use rocket::http::Status;
+    use crate::test::GIT_URL;
+    use rocket::http::ContentType;
     use rocket::local::blocking::Client;
 
-    use crate::test::GIT_URL;
-
-    #[test]
-    #[tracing_test::traced_test]
-    fn test_ensure_compilation() {
+    fn ask_compilation(
+        demo_id: &str,
+        request: &CompilationRequest,
+    ) -> Result<(), CompilationResponse> {
+        let demo_id = DemoID::try_from(demo_id).unwrap();
         let client = Client::tracked(main_rocket()).expect("valid rocket instance");
-        let ddl_build = DDLBuild {
-            url: GIT_URL.into(),
-            rev: "69b4dbc2ff9c3102c3b86639ed1ab608a6b5ba79".into(),
-            dockerfile: ".ipol/Dockerfile".into(),
-        };
         let response = client
-            .post("/ensure_compilation")
+            .post(format!("/compilations/{demo_id}"))
             .header(rocket::http::ContentType::Form)
-            .body(format!(
-                "demo_id={}&ddl_build={}",
-                "t001",
-                serde_json::to_string(&ddl_build).unwrap()
-            ))
+            .body(serde_json::to_string(&request).unwrap())
             .dispatch();
-        assert_eq!(response.status(), Status::Ok);
-        assert_eq!(
-            response.into_json(),
-            Some(EnsureCompilationResponse {
-                status: "OK".into(),
-                message: "".into(),
-                buildlog: None,
-            })
-        );
+
+        match response.status().code {
+            201 => {
+                assert!(response.into_string().is_none());
+                Ok(())
+            }
+            500 => {
+                assert_eq!(response.content_type(), Some(ContentType::JSON));
+                Err(response.into_json().unwrap())
+            }
+            _ => {
+                panic!()
+            }
+        }
     }
 
     #[test]
     #[tracing_test::traced_test]
-    fn test_ensure_compilation_missing_dockerfile() {
-        let client = Client::tracked(main_rocket()).expect("valid rocket instance");
-        let ddl_build = DDLBuild {
-            url: GIT_URL.into(),
-            rev: "69b4dbc2ff9c3102c3b86639ed1ab608a6b5ba79".into(),
-            dockerfile: "missing".into(),
+    fn test_compilation() {
+        let request = CompilationRequest {
+            ddl_build: DDLBuild {
+                url: GIT_URL.into(),
+                rev: "69b4dbc2ff9c3102c3b86639ed1ab608a6b5ba79".into(),
+                dockerfile: ".ipol/Dockerfile".into(),
+            },
+            ssh_key: None,
         };
-        let response = client
-            .post("/ensure_compilation")
-            .header(rocket::http::ContentType::Form)
-            .body(format!(
-                "demo_id={}&ddl_build={}",
-                "t002",
-                serde_json::to_string(&ddl_build).unwrap()
-            ))
-            .dispatch();
-        assert_eq!(response.status(), Status::Ok);
+
+        let response = ask_compilation("t001", &request);
+        assert!(response.is_ok());
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn test_compilation_missing_dockerfile() {
+        let request = CompilationRequest {
+            ddl_build: DDLBuild {
+                url: GIT_URL.into(),
+                rev: "69b4dbc2ff9c3102c3b86639ed1ab608a6b5ba79".into(),
+                dockerfile: "missing".into(),
+            },
+            ssh_key: None,
+        };
+
+        let response = ask_compilation("t002", &request);
         assert_eq!(
-            response.into_json(),
-            Some(EnsureCompilationResponse {
-                status: "KO".into(),
+            response,
+            Err(CompilationResponse {
                 message: "Couldn't find dockerfile: missing".into(),
                 buildlog: None,
             })
@@ -533,27 +543,20 @@ mod test {
 
     #[test]
     #[tracing_test::traced_test]
-    fn test_ensure_compilation_invalid_git_commit() {
-        let client = Client::tracked(main_rocket()).expect("valid rocket instance");
-        let ddl_build = DDLBuild {
-            url: GIT_URL.into(),
-            rev: "invalid".into(),
-            dockerfile: ".ipol/Dockerfile".into(),
+    fn test_compilation_invalid_git_commit() {
+        let request = CompilationRequest {
+            ddl_build: DDLBuild {
+                url: GIT_URL.into(),
+                rev: "invalid".into(),
+                dockerfile: ".ipol/Dockerfile".into(),
+            },
+            ssh_key: None,
         };
-        let response = client
-            .post("/ensure_compilation")
-            .header(rocket::http::ContentType::Form)
-            .body(format!(
-                "demo_id={}&ddl_build={}",
-                "t003",
-                serde_json::to_string(&ddl_build).unwrap()
-            ))
-            .dispatch();
-        assert_eq!(response.status(), Status::Ok);
+
+        let response = ask_compilation("t003", &request);
         assert_eq!(
-            response.into_json(),
-            Some(EnsureCompilationResponse {
-                status: "KO".into(),
+            response,
+            Err(CompilationResponse {
                 message: "ipol-demorunner/git: revspec 'invalid' not found; class=Reference (4); code=NotFound (-3)"
                     .into(),
                 buildlog: None,
@@ -563,52 +566,36 @@ mod test {
 
     #[test]
     #[tracing_test::traced_test]
-    fn test_ensure_compilation_invalid_dockerfile() {
-        let client = Client::tracked(main_rocket()).expect("valid rocket instance");
-        let ddl_build = DDLBuild {
-            url: GIT_URL.into(),
-            rev: "69b4dbc2ff9c3102c3b86639ed1ab608a6b5ba79".into(),
-            dockerfile: "Makefile".into(),
+    fn test_compilation_invalid_dockerfile() {
+        let request = CompilationRequest {
+            ddl_build: DDLBuild {
+                url: GIT_URL.into(),
+                rev: "69b4dbc2ff9c3102c3b86639ed1ab608a6b5ba79".into(),
+                dockerfile: "Makefile".into(),
+            },
+            ssh_key: None,
         };
-        let response = client
-            .post("/ensure_compilation")
-            .header(rocket::http::ContentType::Form)
-            .body(format!(
-                "demo_id={}&ddl_build={}",
-                "t004",
-                serde_json::to_string(&ddl_build).unwrap()
-            ))
-            .dispatch();
-        assert_eq!(response.status(), Status::Ok);
 
-        let r: EnsureCompilationResponse = response.into_json().unwrap();
-        assert_eq!(r.status, "KO");
+        let response = ask_compilation("t004", &request);
+        let r = response.unwrap_err();
         assert_eq!(r.message, "Compilation error");
         assert!(!r.buildlog.unwrap().is_empty());
     }
 
     #[test]
     #[tracing_test::traced_test]
-    fn test_ensure_compilation_build_error() {
-        let client = Client::tracked(main_rocket()).expect("valid rocket instance");
-        let ddl_build = DDLBuild {
-            url: GIT_URL.into(),
-            rev: "fe35687".into(),
-            dockerfile: ".ipol/Dockerfile-error".into(),
+    fn test_compilation_build_error() {
+        let request = CompilationRequest {
+            ddl_build: DDLBuild {
+                url: GIT_URL.into(),
+                rev: "fe35687".into(),
+                dockerfile: ".ipol/Dockerfile-error".into(),
+            },
+            ssh_key: None,
         };
-        let response = client
-            .post("/ensure_compilation")
-            .header(rocket::http::ContentType::Form)
-            .body(format!(
-                "demo_id={}&ddl_build={}",
-                "t005",
-                serde_json::to_string(&ddl_build).unwrap()
-            ))
-            .dispatch();
-        assert_eq!(response.status(), Status::Ok);
 
-        let r: EnsureCompilationResponse = response.into_json().unwrap();
-        assert_eq!(r.status, "KO");
+        let response = ask_compilation("t005", &request);
+        let r = response.unwrap_err();
         assert_eq!(r.message, "Compilation error");
         assert!(!r.buildlog.unwrap().is_empty());
     }

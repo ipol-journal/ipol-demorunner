@@ -5,7 +5,7 @@ use std::time::Duration;
 use bollard::models::DeviceRequest;
 use bollard::service::HostConfig;
 use rocket::response::Responder;
-use rocket::serde::json::Json;
+
 use rocket::serde::{Deserialize, Serialize};
 use rocket::tokio::fs;
 use rocket::tokio::io::AsyncWriteExt;
@@ -24,16 +24,14 @@ use crate::compilation::get_git_revision;
 use crate::config;
 use crate::model::*;
 
-#[derive(Debug, FromForm)]
-pub struct ExecAndWaitRequest<'a> {
-    #[field(validate=validate_demoid())]
+#[derive(Debug)]
+pub struct ExecAndWaitRequest<'a, 'b> {
     demo_id: DemoID,
-    #[field(validate=validate_runkey())]
     key: RunKey,
-    params: Json<RunParams>,
+    params: RunParams,
     ddl_run: DDLRun,
     timeout: Option<u64>,
-    inputs: Vec<rocket::fs::TempFile<'a>>,
+    inputs: &'b mut [rocket::fs::TempFile<'a>],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -247,24 +245,25 @@ async fn read_logs_with_timeout(
 }
 
 #[tracing::instrument(skip(req, config, outdir))]
-async fn exec_and_wait_inner(
-    req: &mut ExecAndWaitRequest<'_>,
+async fn exec_and_wait_inner<'a, 'b>(
+    req: &mut ExecAndWaitRequest<'a, 'b>,
     config: &config::Config,
     outdir: &std::path::Path,
 ) -> Result<Duration, ExecError> {
     tracing::debug!("{req:?}");
+
     let docker = Docker::connect_with_socket_defaults()?;
 
     // canonicalize for docker volumes
     let outdir = fs::canonicalize(outdir).await?;
 
-    for input in &mut req.inputs {
+    for input in &mut *req.inputs {
         save_input(input, &outdir).await?;
     }
 
     // TODO/IPOL: it would be better if the git_rev were provided in the payload
     let src_path = PathBuf::from(&config.compilation_root)
-        .join(&req.demo_id)
+        .join(req.demo_id.as_ref())
         .join("src");
     let git_rev = get_git_revision(&src_path)?;
 
@@ -274,7 +273,7 @@ async fn exec_and_wait_inner(
         .map_or(String::new(), |url| (url.clone() + "/"));
     let image_name = format!(
         "{}{}{}:{}",
-        registry, config.docker_image_prefix, req.demo_id, git_rev
+        registry, config.docker_image_prefix, &req.demo_id, git_rev
     );
 
     if config.registry_url.is_some() {
@@ -293,7 +292,7 @@ async fn exec_and_wait_inner(
         }
     }
 
-    let name = format!("{}{}-{}", config.docker_exec_prefix, req.demo_id, req.key);
+    let name = format!("{}{}-{}", config.docker_exec_prefix, &req.demo_id, req.key);
     let options = Some(CreateContainerOptions {
         name: name.as_str(),
         platform: None,
@@ -301,7 +300,6 @@ async fn exec_and_wait_inner(
 
     let env = req
         .params
-        .0
         .clone()
         .into_iter()
         .chain(config.env_vars.clone().into_iter())
@@ -378,6 +376,7 @@ async fn save_exec_info(
 
 pub mod http {
     use rocket::form::Form;
+    use rocket::serde::json::Json;
     use rocket::State;
 
     use super::{
@@ -385,6 +384,7 @@ pub mod http {
         ExecAndWaitInternalError, ExecAndWaitRequest, ExecError, ExecInfo,
     };
     use crate::config;
+    use crate::model::{DDLRun, DemoID, RunKey, RunParams};
 
     #[derive(Responder)]
     #[response(status = 200, content_type = "application/zip")]
@@ -392,19 +392,35 @@ pub mod http {
         zip: Vec<u8>,
     }
 
-    #[tracing::instrument(skip(req, config))]
-    #[post("/exec_and_wait", data = "<req>")]
-    pub async fn exec_and_wait(
-        mut req: Form<ExecAndWaitRequest<'_>>,
+    #[tracing::instrument(skip(config, inputs))]
+    #[post(
+        "/exec_and_wait/<demo_id>?<key>&<ddl_run>&<timeout>&<parameters>",
+        data = "<inputs>"
+    )]
+    pub async fn exec_and_wait<'a>(
+        demo_id: DemoID,
+        key: RunKey,
+        ddl_run: DDLRun,
+        timeout: Option<u64>,
+        parameters: Json<RunParams>,
+        mut inputs: Form<Vec<rocket::fs::TempFile<'a>>>,
         config: &State<config::Config>,
     ) -> Result<ExecAndWaitResponse, ExecAndWaitInternalError> {
         let tmpdir = tempfile::TempDir::new()?;
         let outdir = tmpdir.path();
 
-        let state = exec_and_wait_inner(&mut req, config, outdir).await;
+        let mut req = ExecAndWaitRequest {
+            demo_id,
+            key,
+            ddl_run,
+            timeout,
+            params: parameters.0,
+            inputs: &mut inputs,
+        };
 
-        let key = req.key.clone();
-        let params = req.params.0.clone();
+        let state = exec_and_wait_inner(&mut req, config, outdir).await;
+        let key = req.key;
+        let params = req.params;
         let exec_info = match state {
             Ok(duration) => ExecInfo {
                 key,
@@ -454,6 +470,7 @@ mod test {
     use crate::main_rocket;
     use rocket::http::{ContentType, Status};
     use rocket::local::blocking::Client;
+    use rocket::serde::json::Json;
 
     fn extract_exec_info(resp: &[u8]) -> ExecInfo {
         let reader = std::io::Cursor::new(resp);
@@ -462,148 +479,118 @@ mod test {
         serde_json::from_reader(file).unwrap()
     }
 
+    fn ask_exec(req: &ExecAndWaitRequest) -> ExecInfo {
+        let client = Client::tracked(main_rocket()).expect("valid rocket instance");
+
+        let uri = uri!(super::http::exec_and_wait(
+            demo_id = &req.demo_id,
+            key = &req.key,
+            ddl_run = &req.ddl_run,
+            parameters = &req.params,
+            timeout = req.timeout,
+        ));
+
+        let response = client.post(uri).header(ContentType::Form).dispatch();
+        assert_eq!(response.status(), Status::Ok);
+        assert_eq!(response.content_type(), Some(ContentType::ZIP));
+        let bytes = response.into_bytes().unwrap();
+        extract_exec_info(&bytes)
+    }
+
     #[test]
     #[tracing_test::traced_test]
     fn test_exec_and_wait() {
-        let client = Client::tracked(main_rocket()).expect("valid rocket instance");
+        let req = ExecAndWaitRequest {
+            demo_id: DemoID::try_from("t001").unwrap(),
+            key: RunKey::try_from("test_exec_and_wait").unwrap(),
+            ddl_run: "test $z = $IPOL_DEMOID".into(),
+            params: RunParams::from([
+                ("x".into(), ParamValue::PosInt(1)),
+                ("y".into(), ParamValue::Float(2.5)),
+                ("z".into(), ParamValue::String("t001".into())),
+                ("a".into(), ParamValue::Bool(true)),
+                ("b".into(), ParamValue::NegInt(-2)),
+                ("param space".into(), ParamValue::String("hi world".into())),
+            ]),
+            timeout: Some(10),
+            inputs: &mut [],
+        };
 
-        let key = "test_exec_and_wait".to_string();
-        let params = RunParams::from([
-            ("x".into(), ParamValue::PosInt(1)),
-            ("y".into(), ParamValue::Float(2.5)),
-            ("z".into(), ParamValue::String("t001".into())),
-            ("a".into(), ParamValue::Bool(true)),
-            ("b".into(), ParamValue::NegInt(-2)),
-            ("param space".into(), ParamValue::String("hi world".into())),
-        ]);
-        let ddl_run = "test $z = $IPOL_DEMOID";
-        let response = client
-            .post("/exec_and_wait")
-            .header(ContentType::Form)
-            .body(format!(
-                "demo_id={}&key={}&params={}&ddl_run={}&timeout={}",
-                "t001",
-                key,
-                serde_json::to_string(&params).unwrap(),
-                ddl_run,
-                10,
-            ))
-            .dispatch();
-        assert_eq!(response.status(), Status::Ok);
-        let response = response.into_bytes().unwrap();
-        let exec_info = extract_exec_info(&response);
-        dbg!(&exec_info);
+        let exec_info = ask_exec(&req);
         assert_eq!(exec_info.status, "OK");
-        assert_eq!(exec_info.key, key);
-        assert_eq!(exec_info.params, params);
+        assert_eq!(exec_info.key, req.key);
+        assert_eq!(exec_info.params, req.params);
         assert_eq!(exec_info.error, None);
         assert_eq!(exec_info.algo_info.error_message, None);
         assert!(exec_info.algo_info.run_time.is_some());
-        std::thread::sleep(Duration::from_secs(1));
     }
 
     #[test]
     #[tracing_test::traced_test]
     fn test_exec_and_wait_non_zero_exit_code() {
-        let client = Client::tracked(main_rocket()).expect("valid rocket instance");
+        let req = ExecAndWaitRequest {
+            demo_id: DemoID::try_from("t001").unwrap(),
+            key: RunKey::try_from("test_exec_and_wait_non_zero_exit_code").unwrap(),
+            ddl_run: "echo a; exit 5; echo b;".into(),
+            params: RunParams::new(),
+            timeout: Some(10),
+            inputs: &mut [],
+        };
 
-        let key = "test_exec_and_wait_non_zero_exit_code".to_string();
-        let params = RunParams::new();
-        let ddl_run = "echo a; exit 5; echo b;";
-        let response = client
-            .post("/exec_and_wait")
-            .header(ContentType::Form)
-            .body(format!(
-                "demo_id={}&key={}&params={}&ddl_run={}&timeout={}",
-                "t001",
-                key,
-                serde_json::to_string(&params).unwrap(),
-                &ddl_run,
-                10,
-            ))
-            .dispatch();
-        assert_eq!(response.status(), Status::Ok);
-        let response = response.into_bytes().unwrap();
-        let exec_info = extract_exec_info(&response);
-        dbg!(&exec_info);
+        let exec_info = ask_exec(&req);
         assert_eq!(exec_info.status, "KO");
-        assert_eq!(exec_info.key, key);
-        assert_eq!(exec_info.params, params);
+        assert_eq!(exec_info.key, req.key);
+        assert_eq!(exec_info.params, req.params);
         assert_eq!(exec_info.error, Some("Non-zero exit code (5): a\n".into()));
         assert_eq!(
             exec_info.algo_info.error_message,
             Some("Non-zero exit code (5): a\n".into())
         );
         assert!(exec_info.algo_info.run_time.is_none());
-        std::thread::sleep(Duration::from_secs(1));
     }
 
     #[test]
     #[tracing_test::traced_test]
     fn test_exec_and_wait_timeout() {
-        let client = Client::tracked(main_rocket()).expect("valid rocket instance");
+        let req = ExecAndWaitRequest {
+            demo_id: DemoID::try_from("t001").unwrap(),
+            key: RunKey::try_from("test_exec_and_wait_timeout").unwrap(),
+            ddl_run: "sleep 2".into(),
+            params: RunParams::new(),
+            timeout: Some(1),
+            inputs: &mut [],
+        };
 
-        let key = "test_exec_and_wait_timeout".to_string();
-        let params = RunParams::new();
-        let ddl_run = "sleep 2";
-        let response = client
-            .post("/exec_and_wait")
-            .header(ContentType::Form)
-            .body(format!(
-                "demo_id={}&key={}&params={}&ddl_run={}&timeout={}",
-                "t001",
-                key,
-                serde_json::to_string(&params).unwrap(),
-                &ddl_run,
-                1,
-            ))
-            .dispatch();
-        assert_eq!(response.status(), Status::Ok);
-        let response = response.into_bytes().unwrap();
-        let exec_info = extract_exec_info(&response);
-        dbg!(&exec_info);
+        let exec_info = ask_exec(&req);
         assert_eq!(exec_info.status, "KO");
-        assert_eq!(exec_info.key, key);
-        assert_eq!(exec_info.params, params);
+        assert_eq!(exec_info.key, req.key);
+        assert_eq!(exec_info.params, req.params);
         assert_eq!(exec_info.error, Some("IPOLTimeoutError".into()));
         assert_eq!(
             exec_info.algo_info.error_message,
             Some("IPOLTimeoutError: Execution timeout".into())
         );
         assert!(exec_info.algo_info.run_time.is_none());
-        std::thread::sleep(Duration::from_secs(1));
     }
 
     #[test]
     #[tracing_test::traced_test]
     fn test_exec_and_wait_run_time() {
-        let client = Client::tracked(main_rocket()).expect("valid rocket instance");
+        let req = ExecAndWaitRequest {
+            demo_id: DemoID::try_from("t001").unwrap(),
+            key: RunKey::try_from("test_exec_and_wait_run_time").unwrap(),
+            ddl_run: "sleep 2".into(),
+            params: RunParams::new(),
+            timeout: Some(10),
+            inputs: &mut [],
+        };
 
-        let key = "test_exec_and_wait_run_time".to_string();
-        let params = RunParams::new();
-        let ddl_run = "sleep 2";
-        let response = client
-            .post("/exec_and_wait")
-            .header(ContentType::Form)
-            .body(format!(
-                "demo_id={}&key={}&params={}&ddl_run={}&timeout={}",
-                "t001",
-                key,
-                serde_json::to_string(&params).unwrap(),
-                &ddl_run,
-                10,
-            ))
-            .dispatch();
-        assert_eq!(response.status(), Status::Ok);
-        let response = response.into_bytes().unwrap();
-        let exec_info = extract_exec_info(&response);
-        dbg!(&exec_info);
+        let exec_info = ask_exec(&req);
         assert_eq!(exec_info.status, "OK");
-        assert_eq!(exec_info.key, key);
-        assert_eq!(exec_info.params, params);
+        assert_eq!(exec_info.key, req.key);
+        assert_eq!(exec_info.params, req.params);
         assert_eq!(exec_info.error, None);
         assert_eq!(exec_info.algo_info.error_message, None);
         assert!(exec_info.algo_info.run_time > Some(1.5));
-        std::thread::sleep(Duration::from_secs(1));
     }
 }

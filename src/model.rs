@@ -1,10 +1,12 @@
-use regex::Regex;
-use rocket::form;
 use rocket::serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-pub type DemoID = String;
-pub type RunKey = String;
+mod demoid;
+mod runkey;
+
+pub use demoid::DemoID;
+pub use runkey::RunKey;
+
 pub type DDLRun = String;
 pub type RunParams = HashMap<String, ParamValue>;
 
@@ -23,26 +25,6 @@ pub enum ParamValue {
     NegInt(i64),
     Float(f64),
     String(String),
-}
-
-pub fn validate_demoid<'v>(s: &str) -> form::Result<'v, ()> {
-    lazy_static::lazy_static! {
-        static ref RE: Regex = Regex::new(r"^\w+$").unwrap();
-    }
-    if !RE.is_match(s) {
-        return Err(rocket::form::Error::validation("invalid demo_id").into());
-    }
-    Ok(())
-}
-
-pub fn validate_runkey<'v>(s: &str) -> form::Result<'v, ()> {
-    lazy_static::lazy_static! {
-        static ref RE: Regex = Regex::new(r"^\w+$").unwrap();
-    }
-    if !RE.is_match(s) {
-        return Err(rocket::form::Error::validation("invalid key").into());
-    }
-    Ok(())
 }
 
 impl std::fmt::Display for ParamValue {

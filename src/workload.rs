@@ -1,23 +1,14 @@
+use rocket::http::Status;
+use rocket::response::status;
 use rocket::serde::json::Json;
-use rocket::serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
-pub struct Workload {
-    status: String,
-    workload: f32,
-}
-
-#[get("/get_workload")]
-pub fn get_workload() -> Json<Workload> {
-    Json(Workload {
-        status: "OK".into(),
-        workload: 1.0,
-    })
+#[get("/workloads")] // TODO: why 's'?
+pub fn get_workload() -> status::Custom<Json<f32>> {
+    status::Custom(Status::Ok, Json(1.0))
 }
 
 #[cfg(test)]
 mod test {
-    use super::*;
     use crate::main_rocket;
     use rocket::http::Status;
     use rocket::local::blocking::Client;
@@ -26,14 +17,8 @@ mod test {
     #[tracing_test::traced_test]
     fn test_get_workfload() {
         let client = Client::tracked(main_rocket()).expect("valid rocket instance");
-        let response = client.get("/get_workload").dispatch();
+        let response = client.get("/workloads").dispatch();
         assert_eq!(response.status(), Status::Ok);
-        assert_eq!(
-            response.into_json(),
-            Some(Workload {
-                status: "OK".into(),
-                workload: 1.0,
-            })
-        );
+        assert_eq!(response.into_json(), Some(1.0));
     }
 }
