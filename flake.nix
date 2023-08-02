@@ -33,7 +33,7 @@
         # For `nix develop`
         devShells = {
           default = pkgs.mkShell {
-            nativeBuildInputs = with pkgs; [rustc cargo openssl pkgconfig];
+            nativeBuildInputs = with pkgs; [rustc cargo rustfmt clippy openssl pkgconfig];
           };
         };
       }
