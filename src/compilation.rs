@@ -344,6 +344,9 @@ async fn ensure_compilation_inner(
         let srcdir = srcdir.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CompilationError> {
             let mut ar = Builder::new(Vec::new());
+            // respect the symlink of the source code (so keep symlinks as-is),
+            // but also don't resolve symlinks on the host for obvious security reasons
+            ar.follow_symlinks(false);
             // TODO: exclude .git
             ar.append_dir_all(".", srcdir)?;
             Ok(ar.into_inner()?)
