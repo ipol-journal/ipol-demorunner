@@ -228,6 +228,7 @@ fn prepare_git(
     repo.checkout_head(Some(&mut checkout))?;
 
     update_submodules(&repo)?;
+    tracing::debug!("checked out.");
 
     Ok(commit_id.to_string())
 }
@@ -360,8 +361,10 @@ async fn ensure_compilation_inner(
         match msg {
             Ok(info) => {
                 if let Some(stream) = info.stream {
-                    buildlog.write_all(stream.as_bytes()).await?;
+                    let bytes = stream.as_bytes();
+                    buildlog.write_all(bytes).await?;
                     buildlogbuf.push_str(&stream);
+                    tracing::debug!("{}", String::from_utf8_lossy(bytes).trim());
                 }
                 if let Some(err) = info.error {
                     // this case should not happen since bollard v0.14.0
