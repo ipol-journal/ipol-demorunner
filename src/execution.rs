@@ -392,7 +392,12 @@ pub mod http {
         zip: Vec<u8>,
     }
 
-    #[tracing::instrument(skip(config, inputs))]
+    // for some reasons, we need to use a dedicated struct
+    #[derive(Debug, FromForm)]
+    pub struct Files<'r> {
+        files: Vec<rocket::fs::TempFile<'r>>,
+    }
+    #[tracing::instrument(skip(config, ddl_run, timeout, parameters, inputs))]
     #[post(
         "/exec_and_wait/<demo_id>?<key>&<ddl_run>&<timeout>&<parameters>",
         data = "<inputs>"
@@ -403,12 +408,14 @@ pub mod http {
         ddl_run: DDLRun,
         timeout: Option<u64>,
         parameters: Json<RunParams>,
-        mut inputs: Form<Vec<rocket::fs::TempFile<'a>>>,
+        inputs: Form<Files<'a>>,
         config: &State<config::Config>,
     ) -> Result<ExecAndWaitResponse, ExecAndWaitInternalError> {
         let tmpdir = tempfile::TempDir::new()?;
         let outdir = tmpdir.path();
+        tracing::debug!("{inputs:?}");
 
+        let mut inputs = inputs.into_inner().files;
         let mut req = ExecAndWaitRequest {
             demo_id,
             key,
