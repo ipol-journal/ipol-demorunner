@@ -252,7 +252,7 @@ async fn exec_and_wait_inner<'a, 'b>(
 ) -> Result<Duration, ExecError> {
     tracing::debug!("{req:?}");
 
-    let docker = Docker::connect_with_socket_defaults()?;
+    let docker = Docker::connect_with_local_defaults()?;
 
     // canonicalize for docker volumes
     let outdir = fs::canonicalize(outdir).await?;

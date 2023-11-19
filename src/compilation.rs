@@ -266,7 +266,7 @@ async fn ensure_compilation_inner(
         ));
     }
 
-    let docker = Docker::connect_with_socket_defaults()?.with_timeout(Duration::from_secs(60 * 10));
+    let docker = Docker::connect_with_local_defaults()?;
 
     let registry = config
         .registry_url
