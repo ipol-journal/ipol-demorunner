@@ -1,4 +1,3 @@
-use once_cell::sync::Lazy;
 use rocket::{Build, Rocket};
 use tracing_subscriber::EnvFilter;
 
@@ -18,14 +17,6 @@ const fn index() -> &'static str {
     "This is the IPOL DemoRunner module (docker)"
 }
 
-static TRACING: Lazy<()> = Lazy::new(|| {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .with_env_filter(env_filter)
-        .init();
-});
-
 fn main_rocket() -> Rocket<Build> {
     rocket::build()
         .mount(
@@ -44,7 +35,11 @@ fn main_rocket() -> Rocket<Build> {
 
 #[launch]
 fn _main() -> _ {
-    Lazy::force(&TRACING);
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_env_filter(env_filter)
+        .init();
     main_rocket()
 }
 
