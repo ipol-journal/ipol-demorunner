@@ -161,7 +161,7 @@ fn prepare_git(
     git_fetcher: &GitFetcher,
     path: &Path,
     url: &str,
-    url_ssh_public_key_fingerprint: Option<String>,
+    ssh_fingerprint: Option<String>,
     rev: &str,
 ) -> Result<String, CompilationError> {
     tracing::debug!("preparing the git folder {url}:{rev} to {path:?}");
@@ -202,7 +202,7 @@ fn prepare_git(
                 Ok(if let Some(host_key) = cert.as_hostkey() {
                     let faced_fingerprint =
                         Fingerprint::Sha256(*host_key.hash_sha256().unwrap()).to_string();
-                    if faced_fingerprint == url_ssh_public_key_fingerprint.clone().unwrap() {
+                    if faced_fingerprint == ssh_fingerprint.clone().unwrap() {
                         CertificateOk
                     } else {
                         CertificatePassthrough
@@ -274,7 +274,7 @@ async fn ensure_compilation_inner(
                 &git_fetcher,
                 &srcdir,
                 &ddl_build.url,
-                ddl_build.url_ssh_public_key_fingerprint,
+                ddl_build.ssh_fingerprint,
                 &ddl_build.rev,
             )
         })
@@ -539,7 +539,7 @@ mod test {
         let request = CompilationRequest {
             ddl_build: DDLBuild {
                 url: GIT_URL.into(),
-                url_ssh_public_key_fingerprint: None,
+                ssh_fingerprint: None,
                 rev: "69b4dbc2ff9c3102c3b86639ed1ab608a6b5ba79".into(),
                 dockerfile: ".ipol/Dockerfile".into(),
             },
@@ -556,7 +556,7 @@ mod test {
         let request = CompilationRequest {
             ddl_build: DDLBuild {
                 url: GIT_URL.into(),
-                url_ssh_public_key_fingerprint: None,
+                ssh_fingerprint: None,
                 rev: "69b4dbc2ff9c3102c3b86639ed1ab608a6b5ba79".into(),
                 dockerfile: "missing".into(),
             },
@@ -579,7 +579,7 @@ mod test {
         let request = CompilationRequest {
             ddl_build: DDLBuild {
                 url: GIT_URL.into(),
-                url_ssh_public_key_fingerprint: None,
+                ssh_fingerprint: None,
                 rev: "invalid".into(),
                 dockerfile: ".ipol/Dockerfile".into(),
             },
@@ -603,7 +603,7 @@ mod test {
         let request = CompilationRequest {
             ddl_build: DDLBuild {
                 url: GIT_URL.into(),
-                url_ssh_public_key_fingerprint: None,
+                ssh_fingerprint: None,
                 rev: "69b4dbc2ff9c3102c3b86639ed1ab608a6b5ba79".into(),
                 dockerfile: "Makefile".into(),
             },
@@ -622,7 +622,7 @@ mod test {
         let request = CompilationRequest {
             ddl_build: DDLBuild {
                 url: GIT_URL.into(),
-                url_ssh_public_key_fingerprint: None,
+                ssh_fingerprint: None,
                 rev: "fe35687".into(),
                 dockerfile: ".ipol/Dockerfile-error".into(),
             },
