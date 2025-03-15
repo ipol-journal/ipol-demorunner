@@ -66,16 +66,15 @@ pub trait ToEnvVec {
 
 impl ToEnvVec for RunParams {
     fn to_env_vec(&self, demo_id: &DemoID, key: &RunKey) -> Vec<String> {
-        let mut env = vec![
-            format!("IPOL_DEMOID={}", demo_id),
-            format!("IPOL_KEY={}", key),
+        let env = [
+            ("IPOL_DEMOID", demo_id.to_string()),
+            ("IPOL_KEY", key.to_string()),
         ];
-        for (name, value) in self
-            .iter()
+        self.iter()
             .filter(|(name, _)| Self::is_valid_param_name(name))
-        {
-            env.push(format!("{}={}", name, value));
-        }
-        env
+            .map(|(name, value)| (name.as_ref(), value.to_string()))
+            .chain(env)
+            .map(|(name, value)| format!("{}={}", name, value))
+            .collect()
     }
 }

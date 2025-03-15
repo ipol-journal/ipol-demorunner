@@ -12,7 +12,6 @@ pub struct Config {
     #[serde(default = "five_minutes")]
     pub max_timeout: u64,
     pub gpus: Vec<String>,
-    pub ssh_key_path: Option<String>,
     #[serde(default)]
     pub env_vars: RunParams,
     pub registry_url: Option<String>,

@@ -1,11 +1,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use bollard::auth::DockerCredentials;
 use bollard::image::{ListImagesOptions, RemoveImageOptions};
 
-use rocket::http::hyper::Body;
+use rocket::http::hyper::body::Bytes;
 use rocket::http::Status;
 use rocket::response::status;
 use rocket::serde::json::Json;
@@ -364,22 +363,22 @@ async fn ensure_compilation_inner(
         ..Default::default()
     };
 
-    let vec = {
+    let tar: Bytes = {
         tracing::debug!("building the tar containing the source code");
         let srcdir = srcdir.clone();
-        tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CompilationError> {
+        tokio::task::spawn_blocking(move || -> Result<Bytes, CompilationError> {
             let mut ar = Builder::new(Vec::new());
             // respect the symlink of the source code (so keep symlinks as-is),
             // but also don't resolve symlinks on the host for obvious security reasons
             ar.follow_symlinks(false);
             // TODO: exclude .git
             ar.append_dir_all(".", srcdir)?;
-            Ok(ar.into_inner()?)
+            let ar = ar.into_inner()?;
+            Ok(ar.into())
         })
         .await
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Interrupted, e))??
     };
-    let tar = Body::from(vec);
 
     tracing::debug!("launching docker build_image");
     let mut image_build_stream = docker.build_image(build_image_options, None, Some(tar));

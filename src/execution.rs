@@ -93,7 +93,7 @@ impl<'r> Responder<'r, 'static> for ExecAndWaitInternalError {
 fn zip_dir_into_bytes(dir: &std::path::Path) -> Result<Vec<u8>, ExecAndWaitInternalError> {
     let writer = std::io::Cursor::new(Vec::new());
     let mut zip = zip::ZipWriter::new(writer);
-    let options = zip::write::FileOptions::default()
+    let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Stored)
         .unix_permissions(0o644);
 
