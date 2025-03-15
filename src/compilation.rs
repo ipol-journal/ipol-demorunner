@@ -17,9 +17,13 @@ use rocket::{tokio, State};
 use bollard::{image::BuildImageOptions, Docker};
 
 use futures_util::stream::StreamExt;
-use git2::Repository;
+use git2::{
+    CertificateCheckStatus::{CertificateOk, CertificatePassthrough},
+    Repository,
+};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Serializer;
+use ssh_key::Fingerprint;
 use tar::Builder;
 
 use crate::config;
@@ -157,6 +161,7 @@ fn prepare_git(
     git_fetcher: &GitFetcher,
     path: &Path,
     url: &str,
+    url_ssh_public_key_fingerprint: Option<String>,
     rev: &str,
 ) -> Result<String, CompilationError> {
     tracing::debug!("preparing the git folder {url}:{rev} to {path:?}");
@@ -192,6 +197,19 @@ fn prepare_git(
                     Some(username) => git2::Cred::ssh_key_from_memory(username, ssh_pubkey, ssh_key.0.expose_secret(), None),
                     None => Err(git2::Error::from_str("git auth: couldn't parse the username from the url (make sure that the repository is public or that the url is formatted as such: 'https://<username>@...' or 'ssh://<username>@...')"))
                 }
+                });
+            callbacks.certificate_check(|cert, _hostname| {
+                Ok(if let Some(host_key) = cert.as_hostkey() {
+                    let faced_fingerprint =
+                        Fingerprint::Sha256(*host_key.hash_sha256().unwrap()).to_string();
+                    if faced_fingerprint == url_ssh_public_key_fingerprint.clone().unwrap() {
+                        CertificateOk
+                    } else {
+                        CertificatePassthrough
+                    }
+                } else {
+                    CertificatePassthrough
+                })
             });
             fo.remote_callbacks(callbacks);
         }
@@ -252,7 +270,13 @@ async fn ensure_compilation_inner(
         let ddl_build = req.ddl_build.clone();
         let git_fetcher = GitFetcher::builder().ssh_key(req.ssh_key.clone()).build()?;
         tokio::task::spawn_blocking(move || {
-            prepare_git(&git_fetcher, &srcdir, &ddl_build.url, &ddl_build.rev)
+            prepare_git(
+                &git_fetcher,
+                &srcdir,
+                &ddl_build.url,
+                ddl_build.url_ssh_public_key_fingerprint,
+                &ddl_build.rev,
+            )
         })
         .await
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Interrupted, e))??
@@ -515,6 +539,7 @@ mod test {
         let request = CompilationRequest {
             ddl_build: DDLBuild {
                 url: GIT_URL.into(),
+                url_ssh_public_key_fingerprint: None,
                 rev: "69b4dbc2ff9c3102c3b86639ed1ab608a6b5ba79".into(),
                 dockerfile: ".ipol/Dockerfile".into(),
             },
@@ -531,6 +556,7 @@ mod test {
         let request = CompilationRequest {
             ddl_build: DDLBuild {
                 url: GIT_URL.into(),
+                url_ssh_public_key_fingerprint: None,
                 rev: "69b4dbc2ff9c3102c3b86639ed1ab608a6b5ba79".into(),
                 dockerfile: "missing".into(),
             },
@@ -553,6 +579,7 @@ mod test {
         let request = CompilationRequest {
             ddl_build: DDLBuild {
                 url: GIT_URL.into(),
+                url_ssh_public_key_fingerprint: None,
                 rev: "invalid".into(),
                 dockerfile: ".ipol/Dockerfile".into(),
             },
@@ -576,6 +603,7 @@ mod test {
         let request = CompilationRequest {
             ddl_build: DDLBuild {
                 url: GIT_URL.into(),
+                url_ssh_public_key_fingerprint: None,
                 rev: "69b4dbc2ff9c3102c3b86639ed1ab608a6b5ba79".into(),
                 dockerfile: "Makefile".into(),
             },
@@ -594,6 +622,7 @@ mod test {
         let request = CompilationRequest {
             ddl_build: DDLBuild {
                 url: GIT_URL.into(),
+                url_ssh_public_key_fingerprint: None,
                 rev: "fe35687".into(),
                 dockerfile: ".ipol/Dockerfile-error".into(),
             },
@@ -617,7 +646,7 @@ mod test {
         let commit = "69b4dbc2ff9c3102c3b86639ed1ab608a6b5ba79";
         let url1 = String::from(GIT_URL);
         let git_fetcher = GitFetcher::default();
-        let r = prepare_git(&git_fetcher, path, &url1, commit);
+        let r = prepare_git(&git_fetcher, path, &url1, None, commit);
         assert!(r.is_ok());
         assert_eq!(r.unwrap(), commit);
 
@@ -625,7 +654,7 @@ mod test {
         assert_eq!(url, Some(url1));
 
         let url2 = format!("{}.git", GIT_URL);
-        let r = prepare_git(&git_fetcher, path, &url2, commit);
+        let r = prepare_git(&git_fetcher, path, &url2, None, commit);
         assert!(r.is_ok());
         assert_eq!(r.unwrap(), commit);
 
@@ -648,12 +677,12 @@ mod test {
             dbg!(url);
             let is_ssh = url.contains("git@");
 
-            let r = prepare_git(&git_fetcher, path, url, "master");
+            let r = prepare_git(&git_fetcher, path, url, None, "master");
             dbg!(&r);
             assert_eq!(r.is_ok(), !is_ssh);
 
             if let Some(git_fetcher_with_ssh) = &git_fetcher_with_ssh {
-                let r = prepare_git(git_fetcher_with_ssh, path, url, "master");
+                let r = prepare_git(git_fetcher_with_ssh, path, url, None, "master");
                 dbg!(&r);
                 assert!(r.is_ok());
             }
@@ -668,7 +697,7 @@ mod test {
 
         let git_fetcher = GitFetcher::default();
         let url = "https://github.com/kidanger/invalid-git";
-        let r = prepare_git(&git_fetcher, path, url, "master");
+        let r = prepare_git(&git_fetcher, path, url, None, "master");
         dbg!(&r);
         assert!(r.is_err());
     }
