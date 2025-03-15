@@ -199,17 +199,18 @@ fn prepare_git(
                 }
                 });
             callbacks.certificate_check(|cert, _hostname| {
-                Ok(if let Some(host_key) = cert.as_hostkey() {
-                    let faced_fingerprint =
-                        Fingerprint::Sha256(*host_key.hash_sha256().unwrap()).to_string();
-                    if faced_fingerprint == ssh_fingerprint.clone().unwrap() {
-                        CertificateOk
-                    } else {
-                        CertificatePassthrough
+                if let Some(expected_ssh_fingerprint) = ssh_fingerprint.clone() {
+                    if let Some(host_key) = cert.as_hostkey() {
+                        let faced_fingerprint =
+                            Fingerprint::Sha256(*host_key.hash_sha256().unwrap()).to_string();
+                        if faced_fingerprint == expected_ssh_fingerprint {
+                            return Ok(CertificateOk);
+                        }
                     }
                 } else {
-                    CertificatePassthrough
-                })
+                    return Ok(CertificateOk);
+                }
+                Ok(CertificatePassthrough)
             });
             fo.remote_callbacks(callbacks);
         }
