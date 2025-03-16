@@ -13,6 +13,7 @@ pub type RunParams = HashMap<String, ParamValue>;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DDLBuild {
     pub url: String,
+    pub ssh_fingerprint: Option<String>,
     pub rev: String,
     pub dockerfile: String,
 }
