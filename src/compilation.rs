@@ -160,7 +160,7 @@ fn prepare_git(
     git_fetcher: &GitFetcher,
     path: &Path,
     url: &str,
-    expected_ssh_fingerprint: Option<&str>,
+    expected_ssh_fingerprints: Option<&[String]>,
     rev: &str,
 ) -> Result<String, CompilationError> {
     tracing::debug!("preparing the git folder {url}:{rev} to {path:?}");
@@ -202,11 +202,11 @@ fn prepare_git(
                     .as_hostkey()
                     .and_then(|host_key| host_key.hash_sha256())
                     .map(|hash| Fingerprint::Sha256(*hash).to_string());
-                match (host_fingerprint, expected_ssh_fingerprint) {
+                match (host_fingerprint, expected_ssh_fingerprints) {
                     // if we don't expect a fingerprint, consider the host valid
                     (Some(_), None) => Ok(CertificateOk),
                     (Some(host), Some(expected)) => {
-                        if host == expected {
+                        if expected.contains(host) {
                             Ok(CertificateOk)
                         } else {
                             Ok(CertificatePassthrough)
@@ -279,7 +279,7 @@ async fn ensure_compilation_inner(
                 &git_fetcher,
                 &srcdir,
                 &ddl_build.url,
-                ddl_build.ssh_fingerprint.as_deref(),
+                ddl_build.ssh_fingerprints.as_deref(),
                 &ddl_build.rev,
             )
         })
@@ -544,7 +544,7 @@ mod test {
         let request = CompilationRequest {
             ddl_build: DDLBuild {
                 url: GIT_URL.into(),
-                ssh_fingerprint: None,
+                ssh_fingerprints: None,
                 rev: "69b4dbc2ff9c3102c3b86639ed1ab608a6b5ba79".into(),
                 dockerfile: ".ipol/Dockerfile".into(),
             },
@@ -561,7 +561,7 @@ mod test {
         let request = CompilationRequest {
             ddl_build: DDLBuild {
                 url: GIT_URL.into(),
-                ssh_fingerprint: None,
+                ssh_fingerprints: None,
                 rev: "69b4dbc2ff9c3102c3b86639ed1ab608a6b5ba79".into(),
                 dockerfile: "missing".into(),
             },
@@ -584,7 +584,7 @@ mod test {
         let request = CompilationRequest {
             ddl_build: DDLBuild {
                 url: GIT_URL.into(),
-                ssh_fingerprint: None,
+                ssh_fingerprints: None,
                 rev: "invalid".into(),
                 dockerfile: ".ipol/Dockerfile".into(),
             },
@@ -608,7 +608,7 @@ mod test {
         let request = CompilationRequest {
             ddl_build: DDLBuild {
                 url: GIT_URL.into(),
-                ssh_fingerprint: None,
+                ssh_fingerprints: None,
                 rev: "69b4dbc2ff9c3102c3b86639ed1ab608a6b5ba79".into(),
                 dockerfile: "Makefile".into(),
             },
@@ -627,7 +627,7 @@ mod test {
         let request = CompilationRequest {
             ddl_build: DDLBuild {
                 url: GIT_URL.into(),
-                ssh_fingerprint: None,
+                ssh_fingerprints: None,
                 rev: "fe35687".into(),
                 dockerfile: ".ipol/Dockerfile-error".into(),
             },
@@ -719,7 +719,7 @@ mod test {
                     git_fetcher_with_ssh,
                     path,
                     url,
-                    Some("invalid-fingerprint"),
+                    Some(&["invalid-fingerprint".into()]),
                     "master",
                 );
                 dbg!(&r);
