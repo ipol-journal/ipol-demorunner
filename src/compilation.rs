@@ -160,7 +160,7 @@ fn prepare_git(
     git_fetcher: &GitFetcher,
     path: &Path,
     url: &str,
-    ssh_fingerprint: Option<String>,
+    expected_ssh_fingerprint: Option<&str>,
     rev: &str,
 ) -> Result<String, CompilationError> {
     tracing::debug!("preparing the git folder {url}:{rev} to {path:?}");
@@ -196,20 +196,25 @@ fn prepare_git(
                     Some(username) => git2::Cred::ssh_key_from_memory(username, ssh_pubkey, ssh_key.0.expose_secret(), None),
                     None => Err(git2::Error::from_str("git auth: couldn't parse the username from the url (make sure that the repository is public or that the url is formatted as such: 'https://<username>@...' or 'ssh://<username>@...')"))
                 }
-                });
+            });
             callbacks.certificate_check(|cert, _hostname| {
-                if let Some(expected_ssh_fingerprint) = ssh_fingerprint.clone() {
-                    if let Some(host_key) = cert.as_hostkey() {
-                        let faced_fingerprint =
-                            Fingerprint::Sha256(*host_key.hash_sha256().unwrap()).to_string();
-                        if faced_fingerprint == expected_ssh_fingerprint {
-                            return Ok(CertificateOk);
+                let host_fingerprint = &cert
+                    .as_hostkey()
+                    .and_then(|host_key| host_key.hash_sha256())
+                    .map(|hash| Fingerprint::Sha256(*hash).to_string());
+                match (host_fingerprint, expected_ssh_fingerprint) {
+                    // if we don't expect a fingerprint, consider the host valid
+                    (Some(_), None) => Ok(CertificateOk),
+                    (Some(host), Some(expected)) => {
+                        if host == expected {
+                            Ok(CertificateOk)
+                        } else {
+                            Ok(CertificatePassthrough)
                         }
                     }
-                } else {
-                    return Ok(CertificateOk);
+                    // this one shouldn't happen because the hostkey should be valid
+                    (None, _) => Ok(CertificatePassthrough),
                 }
-                Ok(CertificatePassthrough)
             });
             fo.remote_callbacks(callbacks);
         }
@@ -274,7 +279,7 @@ async fn ensure_compilation_inner(
                 &git_fetcher,
                 &srcdir,
                 &ddl_build.url,
-                ddl_build.ssh_fingerprint,
+                ddl_build.ssh_fingerprint.as_deref(),
                 &ddl_build.rev,
             )
         })
