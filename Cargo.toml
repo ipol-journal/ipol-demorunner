@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-git2 = "0.19"
+git2 = "0.20"
 zip = "2.2"
 tar = "0.4"
 bollard = "0.18"
