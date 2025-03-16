@@ -696,6 +696,40 @@ mod test {
 
     #[test]
     #[tracing_test::traced_test]
+    fn test_prepare_git_private_invalid_fingerprint() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let path = tmpdir.path();
+
+        let ssh_key = SSHKeyPair::from_path("id_ed25519").ok();
+        let git_fetcher_with_ssh = GitFetcher::builder().ssh_key(ssh_key).build().ok();
+
+        let urls = std::env::var("PRIVATE_URLS").unwrap_or_default();
+        for url in urls.split(',').filter(|x| !x.is_empty()) {
+            dbg!(url);
+            let is_ssh = url.contains("git@");
+            // exclude github host, as it is in .ssh/known_hosts
+            // TODO: improve tests to work with IPOL's git host
+            let is_github = url.contains("github");
+            if !is_ssh || is_github {
+                continue;
+            }
+
+            if let Some(git_fetcher_with_ssh) = &git_fetcher_with_ssh {
+                let r = prepare_git(
+                    git_fetcher_with_ssh,
+                    path,
+                    url,
+                    Some("invalid-fingerprint"),
+                    "master",
+                );
+                dbg!(&r);
+                assert!(r.is_err());
+            }
+        }
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
     fn test_prepare_invalid_git() {
         let tmpdir = tempfile::tempdir().unwrap();
         let path = tmpdir.path();
