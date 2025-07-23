@@ -365,6 +365,10 @@ async fn ensure_compilation_inner(
         q: false,
         rm: true,
         forcerm: true,
+        networkmode: config
+            .build_network_mode
+            .clone()
+            .unwrap_or(String::from("bridge")),
         ..Default::default()
     };
 

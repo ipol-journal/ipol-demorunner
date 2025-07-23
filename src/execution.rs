@@ -170,9 +170,11 @@ fn get_docker_binds(config: &config::Config, outdir: &Path) -> Option<Vec<String
 fn get_docker_host_config(config: &config::Config, outdir: &Path) -> HostConfig {
     let device_requests = get_device_requests(config);
     let binds = get_docker_binds(config, outdir);
+    let network_mode = config.exec_network_mode.clone();
     HostConfig {
         binds,
         device_requests,
+        network_mode,
         ..Default::default()
     }
 }

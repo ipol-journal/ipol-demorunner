@@ -15,6 +15,8 @@ pub struct Config {
     #[serde(default)]
     pub env_vars: RunParams,
     pub registry_url: Option<String>,
+    pub exec_network_mode: Option<String>,
+    pub build_network_mode: Option<String>,
 }
 
 const fn five_minutes() -> u64 {
